@@ -180,10 +180,22 @@ void VIInit(void) {
     s_windowWidth = s_config.windowWidth;
     s_windowHeight = s_config.windowHeight;
     
-    // Initialize SDL2 video subsystem
-    if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
-        OSReport("VI: Failed to initialize SDL video: %s\n", SDL_GetError());
-        return;
+    // Ensure SDL is initialized (required before subsystems)
+    // SDL_InitSubSystem can work without SDL_Init, but it's safer to init first
+    if (!SDL_WasInit(SDL_INIT_VIDEO)) {
+        if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+            OSReport("VI: ERROR - Failed to initialize SDL: %s\n", SDL_GetError());
+            OSPanic(__FILE__, __LINE__, "VI: SDL initialization failed");
+            return;
+        }
+        OSReport("VI: SDL initialized\n");
+    } else {
+        // SDL already initialized, just ensure VIDEO subsystem is active
+        if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
+            OSReport("VI: ERROR - Failed to initialize SDL video subsystem: %s\n", SDL_GetError());
+            OSPanic(__FILE__, __LINE__, "VI: SDL video subsystem initialization failed");
+            return;
+        }
     }
     
     // Set OpenGL attributes from config
@@ -212,6 +224,7 @@ void VIInit(void) {
     }
     
     // Create window
+    OSReport("VI: Creating SDL window (%dx%d)...\n", s_windowWidth, s_windowHeight);
     s_window = SDL_CreateWindow(
         s_config.windowTitle,
         SDL_WINDOWPOS_CENTERED,
@@ -222,20 +235,28 @@ void VIInit(void) {
     );
     
     if (!s_window) {
-        OSReport("VI: Failed to create window: %s\n", SDL_GetError());
+        OSReport("VI: ERROR - Failed to create window: %s\n", SDL_GetError());
+        OSPanic(__FILE__, __LINE__, "VI: Window creation failed - %s", SDL_GetError());
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         return;
     }
     
+    OSReport("VI: Window created successfully\n");
+    
     // Create OpenGL context
+    OSReport("VI: Creating OpenGL context...\n");
     s_glContext = SDL_GL_CreateContext(s_window);
     if (!s_glContext) {
-        OSReport("VI: Failed to create OpenGL context: %s\n", SDL_GetError());
+        OSReport("VI: ERROR - Failed to create OpenGL context: %s\n", SDL_GetError());
+        OSReport("VI: Make sure you have a graphics driver installed\n");
+        OSPanic(__FILE__, __LINE__, "VI: OpenGL context creation failed - %s", SDL_GetError());
         SDL_DestroyWindow(s_window);
         s_window = NULL;
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         return;
     }
+    
+    OSReport("VI: OpenGL context created successfully\n");
     
     // Set VSync from config
     if (SDL_GL_SetSwapInterval(s_config.vsync) < 0) {
