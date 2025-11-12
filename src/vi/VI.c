@@ -378,15 +378,29 @@ void VIFlush(void) {
     }
     
     // Process SDL events (window close, resize, etc.)
+    // IMPORTANT: Call this periodically in your game loop for window to remain responsive
+    SDL_PumpEvents();  // Update event queue from OS
+    
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_QUIT) {
             OSReport("VI: Window close requested\n");
+            // Game should handle this (e.g., set a flag to exit)
         } else if (event.type == SDL_WINDOWEVENT) {
-            if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
-                s_windowWidth = event.window.data1;
-                s_windowHeight = event.window.data2;
-                OSReport("VI: Window resized to %dx%d\n", s_windowWidth, s_windowHeight);
+            switch (event.window.event) {
+                case SDL_WINDOWEVENT_RESIZED:
+                    s_windowWidth = event.window.data1;
+                    s_windowHeight = event.window.data2;
+                    OSReport("VI: Window resized to %dx%d\n", s_windowWidth, s_windowHeight);
+                    break;
+                case SDL_WINDOWEVENT_SHOWN:
+                    OSReport("VI: Window shown\n");
+                    break;
+                case SDL_WINDOWEVENT_HIDDEN:
+                    OSReport("VI: Window hidden\n");
+                    break;
+                default:
+                    break;
             }
         }
     }
