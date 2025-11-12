@@ -243,6 +243,13 @@ void VIInit(void) {
     
     OSReport("VI: Window created successfully\n");
     
+    // Explicitly show the window (though SDL_WINDOW_SHOWN should do this)
+    SDL_ShowWindow(s_window);
+    
+    // Process one event to ensure window appears
+    SDL_Event event;
+    SDL_PumpEvents();
+    
     // Create OpenGL context
     OSReport("VI: Creating OpenGL context...\n");
     s_glContext = SDL_GL_CreateContext(s_window);
