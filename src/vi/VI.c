@@ -178,6 +178,9 @@ static void RetraceEmulator(OSAlarm* alarm, OSContext* context) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 static void InitVIRetrace(void) {
+    // Initialize alarm structure (must call before OSSetPeriodicAlarm)
+    OSCreateAlarm(&s_retraceAlarm);
+    
     // Calculate frame time based on TV mode
     OSTime frameTime;
     if (s_config.tvMode == 1) {
