@@ -48,14 +48,10 @@
 #include <dolphin/vi.h>
 #include <dolphin/VIConfig.h>
 #include <dolphin/os.h>
+#include <dolphin/os/OSAlarm.h>
 #include <SDL.h>
 #include <string.h>
-
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <pthread.h>
-#endif
+#include <stdlib.h>
 
 /*---------------------------------------------------------------------------*
     Internal State
@@ -87,71 +83,118 @@ static u32 s_scanMode = VI_INTERLACE;
 static VIRetraceCallback s_preRetraceCallback = NULL;
 static VIRetraceCallback s_postRetraceCallback = NULL;
 
-// Timing thread for VBlank simulation
-#ifdef _WIN32
-static HANDLE s_retraceThread = NULL;
-static volatile BOOL s_retraceRunning = FALSE;
-#else
-static pthread_t s_retraceThread;
-static volatile BOOL s_retraceRunning = FALSE;
-#endif
+// VI register state (inspired by PPCArthur __VIEmuRegs)
+// Track VI hardware register state for better compatibility
+typedef struct {
+    u16 dsp_cfg;        // VI_DSP_CFG - Display configuration
+    u16 dsp_pos_u;      // VI_DSP_POS_U - Display position upper
+    u16 dsp_pos_l;      // VI_DSP_POS_L - Display position lower
+    u16 dsp_int0_u;     // VI_DSP_INT0_U - Interrupt 0 upper
+    u16 dsp_int0_l;     // VI_DSP_INT0_L - Interrupt 0 lower
+    u16 dsp_int1_u;     // VI_DSP_INT1_U - Interrupt 1 upper
+    u16 dsp_int1_l;     // VI_DSP_INT1_L - Interrupt 1 lower
+    u16 dsp_int2_u;     // VI_DSP_INT2_U - Interrupt 2 upper
+    u16 dsp_int2_l;     // VI_DSP_INT2_L - Interrupt 2 lower
+    u16 dsp_int3_u;     // VI_DSP_INT3_U - Interrupt 3 upper
+    u16 dsp_int3_l;     // VI_DSP_INT3_L - Interrupt 3 lower
+} VIRegisterState;
+
+static VIRegisterState s_viRegs = {0};
+
+// PI interrupt status (like PPCArthur __PIEmuRegs[PI_REG_INTSR])
+// Track which interrupts are pending
+static u32 s_piIntsr = 0;  // PI interrupt status register
+
+// Timing alarm for VBlank simulation (like PPCArthur RetraceEmulator)
+// Use OSAlarm instead of thread for more accurate timing
+static OSAlarm s_retraceAlarm = {0};
+static OSTime s_frameStart = 0;  // Frame start time for position calculation
+static u32 s_field = 0;          // Current field (0=below, 1=above) for interlaced
 
 /*---------------------------------------------------------------------------*
-  Name:         RetraceThread
+  Name:         RetraceEmulator
 
-  Description:  Background thread that simulates VBlank interrupts.
-                Calls retrace callbacks at display refresh rate.
+  Description:  Alarm handler for fake 60Hz VBlank interrupt simulation.
+                Inspired by PPCArthur's RetraceEmulator().
+                Called by OSAlarm at display refresh rate.
 
-  Arguments:    arg  Unused
+  Arguments:    alarm   60Hz timer alarm
+                context Current context
 
-  Returns:      0 (thread return)
+  Returns:      None
  *---------------------------------------------------------------------------*/
-#ifdef _WIN32
-static DWORD WINAPI RetraceThread(LPVOID arg)
-#else
-static void* RetraceThread(void* arg)
-#endif
-{
-    (void)arg;
+static void RetraceEmulator(OSAlarm* alarm, OSContext* context) {
+    (void)alarm;
+    (void)context;
     
-    // Calculate frame time based on TV mode from config
-    u32 frameTimeMs;
-    if (s_config.tvMode == 1) {
-        frameTimeMs = 20;  // PAL: 50Hz
-    } else if (s_config.fpsCap > 0 && s_config.vsync == 0) {
-        frameTimeMs = 1000 / s_config.fpsCap;  // Custom FPS cap
+    // Toggle field for interlaced mode (like PPCArthur)
+    s_field ^= 1;
+    
+    // Set interrupt status based on field
+    // On original hardware, VI generates interrupts at field boundaries
+    if (s_field == 0) {
+        // Field below - set INT0
+        s_viRegs.dsp_int0_u |= 0x0001;  // INT0_MASK
+        s_piIntsr |= 0x0001;  // PI_INTSR_REG_VIINT_MASK
     } else {
-        frameTimeMs = 16;  // NTSC: 60Hz (default)
+        // Field above - set INT1 (for next field)
+        s_viRegs.dsp_int1_u |= 0x0001;  // INT1_MASK
+        s_piIntsr |= 0x0001;  // PI_INTSR_REG_VIINT_MASK
+        
+        // Store frame start time for position calculation
+        s_frameStart = OSGetTime();
     }
     
-    while (s_retraceRunning) {
-        // Sleep for one frame
-        OSSleepTicks(OSMillisecondsToTicks(frameTimeMs));
-        
-        // Pre-retrace callback (if enabled in config)
-        if (s_config.enableCallbacks && s_preRetraceCallback) {
-            s_preRetraceCallback(s_retraceCount);
-        }
-        
-        // Swap buffers (simulate VI hardware updating current FB)
-        if (s_nextFB) {
-            s_currentFB = s_nextFB;
-        }
-        
-        // Increment retrace count
-        s_retraceCount++;
-        
-        // Post-retrace callback (if enabled in config)
-        if (s_config.enableCallbacks && s_postRetraceCallback) {
-            s_postRetraceCallback(s_retraceCount);
-        }
+    // Pre-retrace callback (if enabled)
+    if (s_config.enableCallbacks && s_preRetraceCallback) {
+        s_preRetraceCallback(s_retraceCount);
     }
     
-#ifdef _WIN32
-    return 0;
-#else
-    return NULL;
-#endif
+    // Swap buffers (simulate VI hardware updating current FB)
+    if (s_nextFB) {
+        s_currentFB = s_nextFB;
+    }
+    
+    // Increment retrace count
+    s_retraceCount++;
+    
+    // Post-retrace callback (if enabled)
+    if (s_config.enableCallbacks && s_postRetraceCallback) {
+        s_postRetraceCallback(s_retraceCount);
+    }
+    
+    // Note: On original hardware, this would trigger __OSDispatchInterrupt()
+    // On PC, we just call callbacks directly
+}
+
+/*---------------------------------------------------------------------------*
+  Name:         InitVIRetrace
+
+  Description:  Initialize 60Hz timer interrupt simulation.
+                Inspired by PPCArthur's InitVIRetrace().
+
+  Arguments:    None
+
+  Returns:      None
+ *---------------------------------------------------------------------------*/
+static void InitVIRetrace(void) {
+    // Calculate frame time based on TV mode
+    OSTime frameTime;
+    if (s_config.tvMode == 1) {
+        frameTime = OSMicrosecondsToTicks(1000000 / 50);  // PAL: 50Hz (20ms)
+    } else if (s_config.fpsCap > 0 && s_config.vsync == 0) {
+        frameTime = OSMicrosecondsToTicks(1000000 / s_config.fpsCap);
+    } else {
+        frameTime = OSMicrosecondsToTicks(1000000 / 60);  // NTSC: 60Hz (16.67ms)
+    }
+    
+    // Set up periodic alarm for VBlank simulation
+    // Like PPCArthur: OSSetPeriodicAlarm(&alarm, OSGetTime(), frameTime, RetraceEmulator)
+    OSSetPeriodicAlarm(&s_retraceAlarm, OSGetTime(), frameTime, RetraceEmulator);
+    s_frameStart = OSGetTime();
+    
+    OSReport("VI: Retrace alarm initialized (%s Hz)\n", 
+             s_config.tvMode == 1 ? "50" : "60");
 }
 
 /*---------------------------------------------------------------------------*
@@ -293,21 +336,16 @@ void VIInit(void) {
     s_preRetraceCallback = NULL;
     s_postRetraceCallback = NULL;
     
-    // Start retrace simulation thread
-    s_retraceRunning = TRUE;
+    // Initialize VI register state (like PPCArthur)
+    memset(&s_viRegs, 0, sizeof(s_viRegs));
+    s_piIntsr = 0;
+    s_field = 0;
+    s_frameStart = 0;
     
-#ifdef _WIN32
-    s_retraceThread = CreateThread(NULL, 0, RetraceThread, NULL, 0, NULL);
-    if (!s_retraceThread) {
-        OSReport("VI: Failed to create retrace thread\n");
-        s_retraceRunning = FALSE;
-    }
-#else
-    if (pthread_create(&s_retraceThread, NULL, RetraceThread, NULL) != 0) {
-        OSReport("VI: Failed to create retrace thread\n");
-        s_retraceRunning = FALSE;
-    }
-#endif
+    // Initialize retrace alarm (like PPCArthur InitVIRetrace)
+    // Check if VI is enabled (DSP_CFG_ENB bit)
+    // On original hardware, retrace timer only starts when VI is enabled
+    InitVIRetrace();
     
     s_initialized = TRUE;
     OSReport("VI: Video interface initialized\n");
@@ -556,8 +594,9 @@ u32 VIGetRetraceCount(void) {
   Returns:      VI_FIELD_ABOVE or VI_FIELD_BELOW
  *---------------------------------------------------------------------------*/
 u32 VIGetNextField(void) {
-    // Alternate fields for interlaced
-    return (s_retraceCount & 1) ? VI_FIELD_BELOW : VI_FIELD_ABOVE;
+    // Return current field (like PPCArthur)
+    // Field toggles each retrace for interlaced mode
+    return s_field ? VI_FIELD_ABOVE : VI_FIELD_BELOW;
 }
 
 /*---------------------------------------------------------------------------*
@@ -570,7 +609,28 @@ u32 VIGetNextField(void) {
   Returns:      Current line (0 on PC)
  *---------------------------------------------------------------------------*/
 u32 VIGetCurrentLine(void) {
-    return 0;  // Not tracked on PC
+    // Calculate current scan line based on time since frame start
+    // Inspired by PPCArthur's VI_DSP_POS calculation
+    if (s_frameStart == 0) {
+        return 0;
+    }
+    
+    OSTime elapsed = OSGetTime() - s_frameStart;
+    u32 nanoseconds = (u32)OSTicksToNanoseconds(elapsed);
+    
+    // Calculate line based on TV mode
+    // NTSC: 262.5 lines per field, ~74ns per dot, ~429 dots per half-line
+    u32 dotsPerHalfLine = 429;
+    u32 dotsPerField = 262 * 2 * dotsPerHalfLine;  // 262 lines * 2 fields * half-line
+    u32 dot = (nanoseconds / 74) % dotsPerField;
+    u32 line = (dot / (2 * dotsPerHalfLine)) + 1;  // +1 because line 0 is reserved
+    
+    // Clamp to valid range
+    if (line > 262) {
+        line = 262;
+    }
+    
+    return line;
 }
 
 /*---------------------------------------------------------------------------*
