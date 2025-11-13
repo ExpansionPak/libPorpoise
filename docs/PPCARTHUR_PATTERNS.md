@@ -140,19 +140,51 @@ u32 VIGetCurrentLine(void) {
 - Better simulation of hardware scan-out behavior
 - Can be used for timing-sensitive operations
 
-## Future Improvements
+## Completed Improvements
 
-### 1. SI Module Register Tracking
+### 1. SI Module Register Tracking ✅
 
 **PPCArthur Pattern:**
 - Tracks SI register state (`__SIEmuRegs`)
 - Simulates controller polling with OSAlarm timers
 - Handles command/response timing
 
-**libPorpoise TODO:**
-- Add SI register state tracking
-- Use OSAlarm for polling simulation (instead of immediate)
-- Track COMCSR, SR, OUTBUF, INBUF registers
+**libPorpoise Implementation:**
+- ✅ Added SI register state tracking (`s_siRegs[]`)
+- ✅ OSAlarm-based transfer timing simulation
+- ✅ Tracks COMCSR, SR, OUTBUF, INBUF registers
+- ✅ State transition detection (when TSTART is set)
+- ✅ Interrupt status tracking (PI_INTSR)
+- ✅ Transfer timing calculation (7600ns + 1050ns + 2000ns + 1050ns + 4200ns * 8 * bytes)
+
+**Code Example:**
+```c
+// SI register state (like PPCArthur __SIEmuRegs)
+static u32 s_siRegs[SI_REG_MAX] = {0};
+
+// Transfer timing simulation
+static void TransferAlarmHandler(OSAlarm* alarm, OSContext* context) {
+    // Clear TSTART bit (transfer complete)
+    s_siRegs[SI_REG_COMCSR] &= ~SI_COMCSR_TSTART;
+    
+    // Set TCINT bit (transfer complete interrupt)
+    s_siRegs[SI_REG_COMCSR] |= SI_COMCSR_TCINT;
+    
+    // Set interrupt status if enabled
+    if ((s_siRegs[SI_REG_COMCSR] & SI_COMCSR_TCINT) &&
+        (s_siRegs[SI_REG_COMCSR] & SI_COMCSR_TCINTMSK)) {
+        s_piIntsr |= PI_INTSR_REG_SIINT_MASK;
+    }
+}
+
+// Transfer timing calculation (like PPCArthur)
+static OSTime CalculateTransferTime(u32 outBytes, u32 inBytes) {
+    u64 baseTime = 11700;  // Base overhead (nanoseconds)
+    u64 byteTime = 33600;  // Per byte (nanoseconds)
+    u64 totalTime = baseTime + (byteTime * (outBytes + inBytes));
+    return OSNanosecondsToTicks(totalTime);
+}
+```
 
 ### 2. EXI Module Register Tracking
 
