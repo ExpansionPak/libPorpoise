@@ -52,6 +52,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -237,12 +243,10 @@ void _ExitProcess(void) {
 #ifdef _WIN32
     /* On Windows, use ExitProcess() for immediate termination */
     /* This avoids calling destructors/atexit handlers */
-    #include <windows.h>
     ExitProcess(0);
 #else
     /* On Unix-like systems, use _exit() for immediate termination */
     /* This doesn't call atexit() handlers or flush stdio buffers */
-    #include <unistd.h>
     _exit(0);
 #endif
     
