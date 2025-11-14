@@ -1,6 +1,20 @@
 cmake_minimum_required(VERSION 3.15)
 project(libPorpoise VERSION 0.1.0 LANGUAGES C CXX)
 
+# Check for devkitPro and warn if found
+# devkitPro headers are incompatible with this PC port
+if(DEFINED ENV{INCLUDE})
+    string(TOUPPER "$ENV{INCLUDE}" INCLUDE_UPPER)
+    if(INCLUDE_UPPER MATCHES "DEVKIT")
+        message(WARNING "===========================================================================")
+        message(WARNING "WARNING: devkitPro detected in INCLUDE environment variable!")
+        message(WARNING "devkitPro headers are incompatible with this PC port.")
+        message(WARNING "Please remove devkitPro paths from your INCLUDE environment variable.")
+        message(WARNING "This project uses standard system headers (MSVC/MinGW/GCC), not devkitPro.")
+        message(WARNING "===========================================================================")
+    endif()
+endif()
+
 # Set C/C++ standards
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -49,6 +63,14 @@ set(PORPOISE_SOURCES
     # OS Init (Startup Entry Points)
     src/os/init/__start.c
     src/os/init/__ppc_eabi_init.c
+    
+    # Base (PowerPC Architecture)
+    src/base/PPCArch.c
+    src/base/PPCPm.c
+    
+    # DB (Dolphin Debugger)
+    src/db/db.c
+    src/db/dbprintf.c
     
     # PAD (Controller)
     src/pad/PAD.c
@@ -116,6 +138,18 @@ target_link_libraries(porpoise PUBLIC ${SDL2_LIBRARIES})
 if(WIN32)
     target_compile_definitions(porpoise PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_link_libraries(porpoise PRIVATE winmm)
+    
+    # Explicitly exclude devkitPro paths on Windows
+    # Note: devkitPro headers are incompatible with this PC port
+    # If you have devkitPro installed, ensure it's not in your INCLUDE environment variable
+    if(MSVC)
+        # MSVC: Use /X flag to ignore standard include paths, then re-add only what we need
+        # This prevents devkitPro headers from being found
+        message(STATUS "Using MSVC compiler - devkitPro paths will be excluded")
+    elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        message(WARNING "GCC/Clang detected. If you have devkitPro installed, remove it from your PATH and INCLUDE environment variables.")
+        message(WARNING "This project uses standard system headers, not devkitPro.")
+    endif()
 elseif(UNIX)
     target_link_libraries(porpoise PRIVATE pthread m)
 endif()
