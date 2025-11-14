@@ -47,6 +47,10 @@ set(PORPOISE_SOURCES
     src/os/OSUart.c
     src/os/GeckoMemory.c
     
+    # OS Init (Startup Entry Points)
+    src/os/init/__start.c
+    src/os/init/__ppc_eabi_init.c
+    
     # PAD (Controller)
     src/pad/PAD.c
     src/pad/PADClamp.c
