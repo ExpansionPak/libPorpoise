@@ -203,13 +203,17 @@ void* OSInitAlloc(void* arenaStart, void* arenaEnd, int maxHeaps) {
     
     OSReport("OSInitAlloc: start=%p end=%p maxHeaps=%d\n", arenaStart, arenaEnd, maxHeaps);
     
-    // WORKAROUND: If pointers are NULL, use MEM1 arena directly
-    // This handles transpiler pointer translation issues
+    // WORKAROUND: If pointers are NULL, allocate a default arena using malloc
+    // On PC, we don't pre-allocate arenas, so we allocate on demand
     if (arenaStart == NULL || arenaEnd == NULL) {
-        OSReport("OSInitAlloc: NULL pointers detected, using MEM1 arena instead\n");
-        arenaStart = OSGetMEM1ArenaLo();
-        arenaEnd = OSGetMEM1ArenaHi();
-        OSReport("OSInitAlloc: Using MEM1: start=%p end=%p\n", arenaStart, arenaEnd);
+        // Allocate a default 24MB arena (like MEM1 size)
+        u32 defaultSize = 24 * 1024 * 1024;
+        arenaStart = malloc(defaultSize);
+        if (arenaStart == NULL) {
+            OSPanic(__FILE__, __LINE__, "OSInitAlloc: Failed to allocate default arena");
+        }
+        arenaEnd = (u8*)arenaStart + defaultSize;
+        OSReport("OSInitAlloc: NULL pointers detected, allocated %u bytes\n", defaultSize);
     }
     
     if (maxHeaps <= 0) {

@@ -10,6 +10,7 @@ static BOOL s_osInitialized = FALSE;
 /* Arena management variables
  * On GC/Wii, "arenas" define ranges of memory available for allocation
  * MEM1 = 24MB main RAM, MEM2 = 64MB external RAM (Wii only)
+ * On PC, we don't pre-allocate arenas - games can use malloc directly
  */
 static void* s_arenaHi = NULL;
 static void* s_arenaLo = NULL;
@@ -17,13 +18,6 @@ static void* s_mem1ArenaHi = NULL;
 static void* s_mem1ArenaLo = NULL;
 static void* s_mem2ArenaHi = NULL;
 static void* s_mem2ArenaLo = NULL;
-
-/* Simulated memory regions - allocated on first init */
-static void* s_mem1Base = NULL;
-static void* s_mem2Base = NULL;
-
-#define SIMULATED_MEM1_SIZE (24 * 1024 * 1024)  // 24 MB like GameCube/Wii
-#define SIMULATED_MEM2_SIZE (64 * 1024 * 1024)  // 64 MB like Wii
 
 /*---------------------------------------------------------------------------*
   Name:         OSInit
@@ -47,37 +41,16 @@ void OSInit(void) {
     
     s_osInitialized = TRUE;
     
-    // Initialize simulated memory arenas
-    // Many games expect these to be valid memory ranges they can subdivide
-    if (s_mem1Base == NULL) {
-        s_mem1Base = malloc(SIMULATED_MEM1_SIZE);
-        if (s_mem1Base == NULL) {
-            OSPanic(__FILE__, __LINE__, "Failed to allocate simulated MEM1");
-        }
-        
-        s_mem1ArenaLo = s_mem1Base;
-        s_mem1ArenaHi = (u8*)s_mem1Base + SIMULATED_MEM1_SIZE;
-        
-        // Default arena points to MEM1
-        s_arenaLo = s_mem1ArenaLo;
-        s_arenaHi = s_mem1ArenaHi;
-        
-        // Clear the memory (original hardware does this)
-        memset(s_mem1Base, 0, SIMULATED_MEM1_SIZE);
-    }
+    // On PC, we don't pre-allocate memory arenas like the original hardware
+    // Games can use malloc directly, or call OSInitAlloc() with their own ranges
+    // Arena pointers are initialized to NULL - games set them if needed
     
-    if (s_mem2Base == NULL) {
-        s_mem2Base = malloc(SIMULATED_MEM2_SIZE);
-        if (s_mem2Base == NULL) {
-            OSPanic(__FILE__, __LINE__, "Failed to allocate simulated MEM2");
-        }
-        
-        s_mem2ArenaLo = s_mem2Base;
-        s_mem2ArenaHi = (u8*)s_mem2Base + SIMULATED_MEM2_SIZE;
-        
-        // Clear the memory
-        memset(s_mem2Base, 0, SIMULATED_MEM2_SIZE);
-    }
+    s_arenaLo = NULL;
+    s_arenaHi = NULL;
+    s_mem1ArenaLo = NULL;
+    s_mem1ArenaHi = NULL;
+    s_mem2ArenaLo = NULL;
+    s_mem2ArenaHi = NULL;
     
     // Report initialization
     OSReport("==================================\n");
@@ -85,10 +58,7 @@ void OSInit(void) {
     OSReport("GC/Wii SDK PC Port\n");
     OSReport("==================================\n");
     OSReport("Initialized: %s %s\n", __DATE__, __TIME__);
-    OSReport("MEM1 Arena: %p - %p (%d MB)\n", 
-             s_mem1ArenaLo, s_mem1ArenaHi, SIMULATED_MEM1_SIZE / (1024*1024));
-    OSReport("MEM2 Arena: %p - %p (%d MB)\n", 
-             s_mem2ArenaLo, s_mem2ArenaHi, SIMULATED_MEM2_SIZE / (1024*1024));
+    OSReport("Memory: Using standard malloc/free (no pre-allocated arenas)\n");
     OSReport("==================================\n");
 }
 
@@ -194,31 +164,27 @@ void OSPanic(const char* file, int line, const char* fmt, ...) {
   the system heap.
  *---------------------------------------------------------------------------*/
 
-/* Default arena (usually points to MEM1) */
+/* Default arena */
 void* OSGetArenaHi(void) { 
-    OSReport("OSGetArenaHi() returning %p\n", s_arenaHi);
     return s_arenaHi; 
 }
 void* OSGetArenaLo(void) { 
-    OSReport("OSGetArenaLo() returning %p\n", s_arenaLo);
     return s_arenaLo; 
 }
 void  OSSetArenaHi(void* addr) { 
-    OSReport("OSSetArenaHi(%p)\n", addr);
     s_arenaHi = addr; 
 }
 void  OSSetArenaLo(void* addr) { 
-    OSReport("OSSetArenaLo(%p)\n", addr);
     s_arenaLo = addr; 
 }
 
-/* MEM1 arena (24MB main RAM) */
+/* MEM1 arena (24MB main RAM) - stubs for compatibility */
 void* OSGetMEM1ArenaHi(void) { return s_mem1ArenaHi; }
 void* OSGetMEM1ArenaLo(void) { return s_mem1ArenaLo; }
 void  OSSetMEM1ArenaHi(void* addr) { s_mem1ArenaHi = addr; }
 void  OSSetMEM1ArenaLo(void* addr) { s_mem1ArenaLo = addr; }
 
-/* MEM2 arena (64MB external RAM, Wii only) */
+/* MEM2 arena (64MB external RAM, Wii only) - stubs for compatibility */
 void* OSGetMEM2ArenaHi(void) { return s_mem2ArenaHi; }
 void* OSGetMEM2ArenaLo(void) { return s_mem2ArenaLo; }
 void  OSSetMEM2ArenaHi(void* addr) { s_mem2ArenaHi = addr; }

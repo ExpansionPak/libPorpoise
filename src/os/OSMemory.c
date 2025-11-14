@@ -141,9 +141,9 @@
 #include <dolphin/os.h>
 #include <string.h>
 
-/* Simulated memory sizes (matches real hardware) */
-#define SIMULATED_MEM1_SIZE  (24 * 1024 * 1024)  /* 24 MB */
-#define SIMULATED_MEM2_SIZE  (64 * 1024 * 1024)  /* 64 MB */
+/* Memory sizes (matches real hardware) - just constants, no allocation */
+#define MEM1_SIZE  (24 * 1024 * 1024)  /* 24 MB */
+#define MEM2_SIZE  (64 * 1024 * 1024)  /* 64 MB */
 
 /* Protection state tracking (for API compatibility and debug logging) */
 #ifdef _DEBUG
@@ -177,7 +177,7 @@ u32 OSGetPhysicalMem1Size(void) {
      * 
      * PC: Return fixed 24MB to match hardware.
      */
-    return SIMULATED_MEM1_SIZE;
+    return MEM1_SIZE;
 }
 
 /*---------------------------------------------------------------------------*
@@ -201,7 +201,7 @@ u32 OSGetPhysicalMem2Size(void) {
      * PC: Return 64MB for Wii emulation mode.
      * If you want GameCube mode, return 0 here.
      */
-    return SIMULATED_MEM2_SIZE;
+    return MEM2_SIZE;
 }
 
 /*---------------------------------------------------------------------------*
@@ -382,9 +382,9 @@ void __OSMemoryInit(void) {
     
     OSReport("[OSMemory] Initialized\n");
     OSReport("           MEM1: %u MB (%u bytes)\n",
-             SIMULATED_MEM1_SIZE / (1024*1024), SIMULATED_MEM1_SIZE);
+             MEM1_SIZE / (1024*1024), MEM1_SIZE);
     OSReport("           MEM2: %u MB (%u bytes)\n",
-             SIMULATED_MEM2_SIZE / (1024*1024), SIMULATED_MEM2_SIZE);
+             MEM2_SIZE / (1024*1024), MEM2_SIZE);
 #endif
     
     /* Original hardware also:

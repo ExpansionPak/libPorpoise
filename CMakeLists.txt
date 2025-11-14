@@ -45,7 +45,6 @@ set(PORPOISE_SOURCES
     src/os/OSResetSW.c
     src/os/OSRtc.c
     src/os/OSUart.c
-    src/os/GeckoMemory.c
     
     # OS Init (Startup Entry Points)
     src/os/init/__start.c
