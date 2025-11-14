@@ -1,53 +1,8 @@
 /*---------------------------------------------------------------------------*
   __start.c - Program Entry Point for libPorpoise
   
-  This file provides the startup entry point for GameCube/Wii games ported
-  to PC using libPorpoise. It replaces the original PowerPC-specific startup
-  code with PC-compatible initialization.
-  
-  ARCHITECTURAL DIFFERENCES: GC/Wii vs PC
-  ========================================
-  
-  On GC/Wii (PowerPC EABI):
-  -------------------------
-  - Assembly code in __start() initializes PowerPC registers (r1=stack, r2/r13=SDA)
-  - Calls __init_hardware() to initialize hardware (cache, FPU, etc.)
-  - Copies ROM data to RAM, initializes BSS sections
-  - Calls OSInit() to initialize Dolphin OS
-  - Calls __init_user() to run C++ static constructors
-  - Calls main() with argc/argv
-  - Calls exit() when done
-  
-  On PC (libPorpoise):
-  --------------------
-  - Standard C entry point (no assembly needed for register init)
-  - Calls __init_hardware() for PC-specific initialization (stub)
-  - No ROM/RAM copying needed (all code/data in memory)
-  - BSS initialization handled by linker/OS
-  - Calls OSInit() to initialize libPorpoise
-  - Calls __init_user() to run C++ static constructors
-  - Calls main() with argc/argv from OS
-  - Calls exit() when done
-  
-  WHAT WE PRESERVE:
-  - Same initialization sequence (hardware → data → OS → user → main)
-  - C++ static constructor support
-  - exit() and abort() implementations
-  - Compatibility with games expecting this startup sequence
-  
-  WHAT'S DIFFERENT:
-  - No PowerPC register initialization (x86/ARM handled by OS)
-  - No ROM-to-RAM copying (all in memory on PC)
-  - No hardware initialization (no GameCube/Wii hardware)
-  - Standard C main() signature (matches original)
-  
-  USAGE:
-  ------
-  Games can define their own main() function. This __start() will be
-  called first (if linked with libPorpoise init files).
-  
-  If games define their own __start(), it should call OSInit() before
-  calling main() to ensure libPorpoise is initialized.
+  Provides the startup entry point for GameCube/Wii games on PC.
+  Replaces PowerPC-specific startup code with PC-compatible initialization.
  *---------------------------------------------------------------------------*/
 
 #include <dolphin/os.h>

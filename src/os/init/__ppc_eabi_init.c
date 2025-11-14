@@ -1,51 +1,8 @@
 /*---------------------------------------------------------------------------*
   __ppc_eabi_init.c - Hardware and User Initialization for libPorpoise
   
-  This file provides initialization functions called by __start() before
-  main(). It replaces the original PowerPC-specific initialization code
-  with PC-compatible versions.
-  
-  ARCHITECTURAL DIFFERENCES: GC/Wii vs PC
-  ========================================
-  
-  On GC/Wii (PowerPC EABI):
-  -------------------------
-  - __init_hardware() uses assembly to initialize cache, FPU, paired singles
-  - __init_user() calls C++ static constructors
-  - __init_cpp() iterates through _ctors[] array
-  - __fini_cpp() iterates through _dtors[] array
-  - abort() and exit() call _ExitProcess()
-  - _ExitProcess() halts the CPU (PPCHalt())
-  - __flush_cache() uses assembly to flush data cache and invalidate I-cache
-  
-  On PC (libPorpoise):
-  --------------------
-  - __init_hardware() does PC-specific initialization (stub)
-  - __init_user() calls C++ static constructors (if C++)
-  - __init_cpp() iterates through _ctors[] array (if C++)
-  - __fini_cpp() iterates through _dtors[] array (if C++)
-  - abort() and exit() call _ExitProcess()
-  - _ExitProcess() exits the process (exit() or platform-specific)
-  - __flush_cache() is a no-op (no instruction cache on PC)
-  
-  WHAT WE PRESERVE:
-  - Same function names and signatures
-  - C++ static constructor/destructor support
-  - exit() and abort() behavior
-  - Compatibility with games expecting these functions
-  
-  WHAT'S DIFFERENT:
-  - No PowerPC-specific hardware initialization
-  - No cache operations (handled by CPU/OS)
-  - _ExitProcess() uses OS exit instead of CPU halt
-  - __flush_cache() is a no-op
-  
-  C++ SUPPORT:
-  ------------
-  This file supports both C and C++:
-  - If compiled as C++, provides __init_cpp() and __fini_cpp()
-  - If compiled as C, these functions are not needed
-  - _ctors[] and _dtors[] arrays are provided by linker/compiler
+  Provides initialization functions called by __start() before main().
+  Replaces PowerPC-specific initialization with PC-compatible versions.
  *---------------------------------------------------------------------------*/
 
 #include <dolphin/os.h>
