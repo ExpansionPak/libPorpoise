@@ -45,3 +45,19 @@ add_executable(card_test card_test.c)
 target_link_libraries(card_test porpoise)
 target_include_directories(card_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+# onetri_test - GX initialization test
+add_executable(onetri_test onetri_test.c)
+target_link_libraries(onetri_test porpoise)
+target_include_directories(onetri_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+if(WIN32 AND MSVC)
+    target_link_options(onetri_test PRIVATE "/SUBSYSTEM:CONSOLE")
+endif()
+
+# Add SDL2 NuGet package reference for Visual Studio projects
+if(WIN32 AND MSVC)
+    set_target_properties(onetri_test PROPERTIES
+        VS_PACKAGE_REFERENCES "SDL2;SDL2.redist"
+    )
+endif()
+

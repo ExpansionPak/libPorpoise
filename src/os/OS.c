@@ -5,7 +5,41 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#endif
+
 static BOOL s_osInitialized = FALSE;
+static BOOL s_osReportInitialized = FALSE;
+static BOOL s_osReportInProgress = FALSE;  // Guard against recursion
+#ifdef _WIN32
+static BOOL s_consoleAttached = FALSE;
+
+static void EnsureConsole(void) {
+    if (s_consoleAttached) {
+        return;
+    }
+
+    if (!GetConsoleWindow()) {
+        if (!AllocConsole()) {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+
+    FILE* out = NULL;
+    if (freopen_s(&out, "CONOUT$", "w", stdout) == 0) {
+        setvbuf(stdout, NULL, _IONBF, 0);
+    }
+    if (freopen_s(&out, "CONOUT$", "w", stderr) == 0) {
+        setvbuf(stderr, NULL, _IONBF, 0);
+    }
+
+    s_consoleAttached = TRUE;
+}
+#endif
 
 /* Arena management variables
  * On GC/Wii, "arenas" define ranges of memory available for allocation
@@ -40,6 +74,10 @@ void OSInit(void) {
     }
     
     s_osInitialized = TRUE;
+
+#ifdef _WIN32
+    EnsureConsole();
+#endif
     
     // On PC, we don't pre-allocate memory arenas like the original hardware
     // Games can use malloc directly, or call OSInitAlloc() with their own ranges
@@ -99,19 +137,67 @@ u32 OSGetConsoleType(void) {
   Returns:      None.
  *---------------------------------------------------------------------------*/
 void OSReport(const char* fmt, ...) {
+    if (s_osReportInProgress) {
+        /* Prevent infinite recursion if OSReport is triggered while already running */
+        fputs("[OSReport] Recursion detected!\n", stderr);
+        fflush(stderr);
+        return;
+    }
+
+    if (!fmt) {
+        fputs("[OSReport] NULL format string\n", stderr);
+        fflush(stderr);
+        return;
+    }
+
+    s_osReportInProgress = TRUE;
+
+    if (!s_osReportInitialized) {
+        s_osReportInitialized = TRUE;
+    }
+
+    char buffer[2048];
+    size_t offset = 0;
+
+    /* Optional timestamp for easier debugging */
+    if (s_osInitialized) {
+        time_t now = time(NULL);
+        if (now != (time_t)-1) {
+            struct tm* tm_info = localtime(&now);
+            if (tm_info) {
+                offset = (size_t)snprintf(buffer, sizeof(buffer), "[%02d:%02d:%02d] ",
+                                          tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
+                if (offset >= sizeof(buffer)) {
+                    offset = sizeof(buffer) - 1;
+                }
+            }
+        }
+    }
+
     va_list args;
-    
-    // Add timestamp for easier debugging
-    time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
-    char timeStr[32];
-    strftime(timeStr, sizeof(timeStr), "%H:%M:%S", tm_info);
-    printf("[%s] ", timeStr);
-    
     va_start(args, fmt);
-    vprintf(fmt, args);
+    int written = vsnprintf(buffer + offset, sizeof(buffer) - offset, fmt, args);
     va_end(args);
-    fflush(stdout);
+
+    if (written < 0) {
+        fputs("[OSReport] Formatting error\n", stderr);
+        fflush(stderr);
+        s_osReportInProgress = FALSE;
+        return;
+    }
+
+    size_t totalLen = offset + (size_t)written;
+    if (totalLen >= sizeof(buffer)) {
+        totalLen = sizeof(buffer) - 1;
+    }
+
+#ifdef _WIN32
+    buffer[totalLen] = '\0';
+    OutputDebugStringA(buffer);
+#endif
+    fwrite(buffer, 1, totalLen, stdout);
+
+    s_osReportInProgress = FALSE;
 }
 
 /*---------------------------------------------------------------------------*
@@ -133,7 +219,7 @@ void OSReport(const char* fmt, ...) {
 void OSPanic(const char* file, int line, const char* fmt, ...) {
     va_list args;
     
-    fprintf(stderr, "\n");
+    //fprintf(stderr, "\n");
     fprintf(stderr, "========================================\n");
     fprintf(stderr, "         PANIC - FATAL ERROR\n");
     fprintf(stderr, "========================================\n");
