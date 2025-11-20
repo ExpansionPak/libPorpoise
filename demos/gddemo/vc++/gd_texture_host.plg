@@ -1,0 +1,52 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: gd_init_host - Win32 Release--------------------
+</h3>
+<h3>Command Lines</h3>
+
+
+
+<h3>Results</h3>
+gd-init-host.exe - 0 error(s), 0 warning(s)
+<h3>
+--------------------Configuration: gd_light_host - Win32 Release--------------------
+</h3>
+<h3>Command Lines</h3>
+
+
+
+<h3>Results</h3>
+gd-light-host.exe - 0 error(s), 0 warning(s)
+<h3>
+--------------------Configuration: gd_matrix_host - Win32 Release--------------------
+</h3>
+<h3>Command Lines</h3>
+
+
+
+<h3>Results</h3>
+gd-matrix-host.exe - 0 error(s), 0 warning(s)
+<h3>
+--------------------Configuration: gd_tev_host - Win32 Release--------------------
+</h3>
+<h3>Command Lines</h3>
+
+
+
+<h3>Results</h3>
+gd-tev-host.exe - 0 error(s), 0 warning(s)
+<h3>
+--------------------Configuration: gd_texture_host - Win32 Release--------------------
+</h3>
+<h3>Command Lines</h3>
+
+
+
+<h3>Results</h3>
+gd-texture-host.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

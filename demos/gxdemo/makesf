@@ -1,0 +1,322 @@
+#!itcl_sh
+
+# Copyright 1998, 1999 Nintendo.  All rights reserved.
+#
+# These coded instructions, statements, and computer programs contain
+# proprietary information of Nintendo of America Inc. and/or Nintendo
+# Company Ltd., and are protected by Federal copyright law.  They may
+# not be disclosed to third parties or copied or duplicated in any form,
+# in whole or in part, without the prior written consent of Nintendo.
+
+# This script assumes its in the build/tests/gx directory
+# this script won't do anything if called from the wrong place.
+set myloc "*/dolphin/build/demos/gxdemo"
+set where [pwd]
+if { ![string match $myloc $where] } {
+    puts "This script should only be executed in $myloc"
+    puts "--you are in $where"
+    exit
+}
+
+# 
+#  List of tests and single frames in each test
+#
+set tests(cul-faces)      {1 2 3 4}
+set tests(cul-viewport)   {1 2 3 4}
+set tests(DL-geom)        {0}
+set tests(DL-state)       {0}
+set tests(frb-copy)       {0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23}
+set tests(frb-zcopy)      {0}
+set tests(frb-fld-int)    {0}
+set tests(frb-fld-dbs)    {0}
+set tests(frb-fld-int-aa) {0}
+set tests(frb-fld-dbs-aa) {0}
+set tests(frb-aa-full)    {0}
+set tests(frb-single)     {0}
+set tests(frb-triple)     {0}
+set tests(G2D-test)       {0}
+set tests(geo-particle)   {0 1 2}
+set tests(geo-vtx-fmt)    {0x00011010 0x00011000 0x00010010 0x00001010 0x00032010 0x00036024 0x00042090 0x000470A8 0x00186134 0x02087148}
+set tests(lit-basic)      {0 1 2 3}
+set tests(lit-multi)      {0 15 255 256}
+set tests(lit-alpha)      {0 1 2 3}
+set tests(lit-spot)       {0}
+set tests(lit-dist-atn)   {0}
+set tests(lit-unclamp)    {0 1}
+set tests(lit-cartoon)    {0 1 2 3}
+set tests(lit-texture)    {0 1}
+set tests(lit-tx-alpha)   {0}
+set tests(lit-prelit)     {0 1 2 3}
+set tests(lit-atn-func)   {0 1 2 3 4 5 6 7 8 9 10}
+set tests(lit-specular)   {0 1 2 3}
+set tests(pix-fog)        {1 2}
+set tests(pix-blend)      {0}
+set tests(pix-logic)      {1 2 3 4}
+set tests(pix-z-comp)     {1 2}
+set tests(pix-a-comp)     {1 2}
+set tests(tev-one-op)     {0 1 2 3 4 5 6 7 8 9 10 11}
+set tests(tev-clamp)      {0 1 2 3}
+set tests(tev-multi)      {0 1 2 3}
+set tests(tev-complex)    {0}
+set tests(tev-outline)    {1}
+set tests(tg-basic)       {0 1 2 3}
+set tests(tg-project)     {0 1 2 3 4 5 6}
+set tests(tg-emboss)      {1 2 3 4}
+set tests(tg-shadow)      {0}
+set tests(tg-shadow2)     {0x0000 0x0010 0x0018 0x0050 0x00B0}
+set tests(tg-spheremap)   {0 1 2 3 4 5 6 0x10 0x11 0x12 0x13 0x14 0x15 0x16}
+set tests(tg-parabolicmap) {0 1 2 3 4 5 0x10 0x11 0x12 0x13 0x14 0x15 }
+set tests(tg-light-fx)    {0 1 2}
+set tests(tex-fmt-cube)   {0 2 5 7}
+set tests(tex-filter)     {0 1}
+set tests(tex-fmt-tpl)    {0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25}
+set tests(tex-wrap)       {0 1}
+set tests(tex-tlut)       {0 1 2 3 4 5 6 7 8}
+set tests(tex-layer)      {0 1 2}
+set tests(tex-2-tex)      {0}
+set tests(tex-tc-alloc)   {0 1 2 3 4 5 6}
+set tests(tex-preload)    {0}
+set tests(tex-mix-mode)   {0 1 2 3 4 5 6 7}
+set tests(tex-invalid)    {0 1 2 3}
+set tests(tex-lod)        {0 1 2 3}
+set tests(tf-pn-mtx)      {0}
+set tests(tf-stitch)      {0}
+set tests(tf-tg-mtx)      {0 1 2 3}
+set tests(tf-reflect)     {1}
+
+set tests(smp-texexample) {0}
+set tests(smp-gxmodels)   {0 1 2 3}
+set tests(smp-octa)       {0}
+set tests(smp-onetri)     {0}
+set tests(smp-onetri_dl)  {0}
+set tests(smp-toy)        {0}
+
+#
+#  Translate test names to test directories
+#
+set dirs(cul) "Culling"
+set dirs(DL)  "DisplayList"
+set dirs(G2D) "G2d"
+set dirs(frb) "Framebuffer"
+set dirs(geo) "Geometry"
+set dirs(lit) "Lighting"
+set dirs(pix) "PixelProc"
+set dirs(pre) "Previewer"
+set dirs(tg)  "TexGen"
+set dirs(tex) "Texture"
+set dirs(tev) "Tev"
+set dirs(tf)  "Transform"
+set dirs(smp) "Simple"
+
+set MAKE "c:/CYGNUS/CYGWIN-b20/H-I586-cygwin32/bin/make.exe"
+
+#
+#  Accepted arguments
+#
+set keyArgs(-search)     2
+set keyArgs(-frame)      2
+set keyArgs(-debug)      0
+set keyArgs(-dryrun)     0
+set keyArgs(-mac)        0
+set keyArgs(-even)       0
+set keyArgs(-odd)        0
+
+#
+#  Default arguments
+#
+set retArgs(-search)    "*"
+set retArgs(-frame)      -1
+set retArgs(-debug)      0
+set retArgs(-dryrun)     0
+set retArgs(-mac)        0
+set retArgs(-even)       0
+set retArgs(-odd)        0
+
+### --------------------------------------------------------------------------
+#
+# PROCEDURE
+#   parseargs
+#
+# DESCRIPTION
+#   Given a list of acceptable arguments, parses these out of 
+#   the given list (with args, if requested), and
+#   returns any unparseable arguments.
+#
+# ARGUMENTS
+#   allowed_switches      Name of array of numbers, indexed by allowed 
+#                         switches, stating the defaults for
+#                         the returned_value array (the next argument)
+#       0  -  set to zero     -  no argument (1 if switch present)
+#       1  -  set to empty string                -  takes argument
+#       2  -  default preset by calling routine  -  takes argument
+#   returned_value        Name of array to fill in with parsed switch values
+#   actual_list           List of switches,etc. to parse
+#
+# RETURN VALUE
+#   unparsed_args         Anything not recognised/not a switch value
+#
+# ERRORS
+#   missing_switch_value  If a switch taking an argument appears as 
+#                         the last item without a value
+#
+
+proc parseargs {allowed_switches returned_values actual_list} {
+    upvar $allowed_switches names
+    upvar $returned_values results
+
+    set count [llength $actual_list]
+    set rejected {}
+    set namelist [array names names]
+
+    foreach i $namelist {
+        switch -exact $names($i) {
+            0 {set results($i)  0 }
+            1 {set results($i) {} }
+        }
+    }
+
+    for {set i 0} {$i < $count} {incr i} {
+        set item [lindex $actual_list $i]
+        if {[lsearch -exact $namelist $item]+1} {
+            if {$names($item)} {
+                incr i
+                if {$i<$count} {
+                    set results($item) [lindex $actual_list $i]
+                } else {
+                    error "Argument $item requires a value"
+                }
+            } else {
+                set results($item) 1
+            }
+        } else {
+            lappend rejected $item
+        }
+    }
+
+    return $rejected
+}
+
+#
+#  Parse args and print usage
+#
+set unArgs [parseargs keyArgs retArgs $argv]
+if { $unArgs != "" } {
+    puts "makesf - make single frame tests"
+    puts " Arguments:"
+    puts "   -search <pat>       -make test names that match the pattern"
+    puts "                        can use *, ? wild cards, default is *"
+    puts "   -frame <frame_num>  -make specific frame of the test, default"
+    puts "                        is to make all frames"
+    puts "   -debug              -make debug version of the tests"
+    puts "   -mac                -build for MAC, default is SPRUCE_MARLIN"
+    puts "   -even               -force even field"
+    puts "   -odd                -force odd field"
+    puts "   -dryrun             -don't make, just print commands"
+    puts "   -help               -print usage message"
+    puts ""
+    exit
+}
+
+#
+#  Set flags
+#
+if { !$retArgs(-debug) } {
+    set ndebug "NDEBUG=TRUE"
+    if { $retArgs(-mac) } {
+        set suffix ".bin"
+        set xsuffix ".xSYM"
+        set sys "MAC"
+    } else {
+        set suffix ".elf"
+        set sys "SPRUCE_MARLIN"
+    }
+    set objbase "obj/$sys/NDEBUG"
+} else {
+    set ndebug ""
+    if { $retArgs(-mac) } {
+        set suffix "D.bin"
+        set xsuffix "D.xSYM"
+        set sys "MAC"
+    } else {
+        set suffix "D.elf"
+        set sys "SPRUCE_MARLIN"
+    }
+    set objbase "obj/$sys/DEBUG"
+}
+
+if { $retArgs(-even) } {
+    set field "__EVENFIELD=TRUE"
+	set fld "e"
+} elseif { $retArgs(-odd) } {
+    set field "__ODDFIELD=TRUE"
+	set fld "o"
+} else {
+    set field ""
+	set fld ""
+}
+
+set syscmd "PLATFORM=$sys"
+
+#
+#  Build tests
+#
+foreach t [array names tests] {
+    # skip tests that don't match search criteria
+    if [string match $retArgs(-search) $t] {
+        set fname [format "%s%s" $t $suffix]
+        regexp {([A-Za-z0-9]+)\-} $t dummy tpfx
+        set objs [format "%s/%s/%s\*" $objbase $dirs($tpfx) $t]
+        # compile single frame or all frames?
+        if { $retArgs(-frame) < 0 } {
+            # loop over frame numbers
+            foreach f $tests($t) {
+                puts "rm -f $objs"
+                puts "make $ndebug $syscmd $field __SINGLEFRAME=$f $fname"
+                if { !$retArgs(-dryrun) } {
+                    # remove object files since each frame has the same name
+                    exec rm -f $objs
+                    exec $MAKE $ndebug $syscmd $field __SINGLEFRAME=$f $fname
+                    cd "bin/$sys"
+                    # move executable files to a new name with
+                    # appended frame number
+                    if { [file exists $fname] } {
+                        set ffname [format "%s_%08x%s%s" $t $f $fld $suffix]
+                        puts "mv $fname $ffname"
+                        exec mv $fname $ffname
+                        # move symbol file for cross-compiled Mac binary
+                        if { $retArgs(-mac) && $retArgs(-debug) } {
+                            set xname [format "%s%s" $t $xsuffix]
+                            set ffname [format "%s_%08x%s%s" $t $f $fld $xsuffix]
+                            puts "mv $xname $ffname"
+                            exec mv $xname $ffname
+                        }
+                    }
+                    cd "../.."
+                }
+            }
+        } else {
+            # run a single user-defined frame of this test
+            puts "rm -f $objs"
+            puts "make $ndebug $syscmd $field __SINGLEFRAME=$retArgs(-frame) $fname"
+            if { !$retArgs(-dryrun) } {
+                exec rm -f $objs
+                exec $MAKE $ndebug $syscmd $field __SINGLEFRAME=$retArgs(-frame) $fname
+                cd "bin/$sys"
+                if { [file exists $fname] } {
+                    set ffname [format "%s_%08x%s%s" $t $retArgs(-frame) $fld $suffix]
+                    puts "mv $fname $ffname"
+                    exec mv $fname $ffname
+                    if { $retArgs(-mac) && $retArgs(-debug) } {
+                        set xname [format "%s%s" $t $xsuffix]
+                        set ffname [format "%s_%08x%s%s" $t $retArgs(-frame) $fld $xsuffix]
+                        puts "mv $xname $ffname"
+                        exec mv $xname $ffname
+                    }
+                }
+                cd "../.."
+            }
+        }
+    }
+}
+
+exit

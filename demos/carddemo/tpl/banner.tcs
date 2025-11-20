@@ -1,0 +1,7 @@
+path = ./
+file 0 = banner.tga            	      ; this is a 96x32 rgba image
+
+image    0 =  0, 0, RGB5A3            ; use color from file 0, alpha from file 0
+                                      ; convert to RGB5A3 format
+
+texture 0  =  0, x                    ; texture 0 uses image 0, no palette                   

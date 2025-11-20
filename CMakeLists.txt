@@ -31,8 +31,61 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# Find SDL2
-find_package(SDL2 REQUIRED)
+# Find SDL2 (prefer system install, fall back to NuGet package)
+set(SDL2_INCLUDE_DIRS "")
+set(SDL2_LIBRARIES "")
+set(SDL2_IMPORTED_TARGET "")
+find_package(SDL2 QUIET)
+if(SDL2_FOUND)
+    message(STATUS "Found SDL2 via find_package")
+    set(SDL2_IMPORTED_TARGET SDL2::SDL2)
+else()
+    message(WARNING "SDL2 not found via find_package. Trying NuGet package (VS).")
+    if(WIN32)
+        # NuGet restores packages under ${CMAKE_BINARY_DIR}/packages
+        file(GLOB SDL2_NUGET_PACKAGES "${CMAKE_BINARY_DIR}/packages/sdl2.nuget.[0-9]*")
+        list(LENGTH SDL2_NUGET_PACKAGES SDL2_NUGET_COUNT)
+        if(SDL2_NUGET_COUNT GREATER 0)
+            list(SORT SDL2_NUGET_PACKAGES)
+            list(GET SDL2_NUGET_PACKAGES -1 SDL2_NUGET_PATH)
+            set(SDL2_INCLUDE_DIRS "${SDL2_NUGET_PATH}/build/native/include")
+            if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+                set(SDL2_ARCH_DIR "x64")
+            else()
+                set(SDL2_ARCH_DIR "Win32")
+            endif()
+            set(SDL2_LIB_FILE "${SDL2_NUGET_PATH}/build/native/lib/${SDL2_ARCH_DIR}/SDL2.lib")
+            if(NOT EXISTS "${SDL2_LIB_FILE}")
+                message(WARNING "SDL2 NuGet library not found at ${SDL2_LIB_FILE}")
+            else()
+                set(SDL2_LIBRARIES "${SDL2_LIB_FILE}")
+                if(NOT TARGET SDL2::SDL2)
+                    add_library(SDL2::SDL2 UNKNOWN IMPORTED)
+                endif()
+                set_target_properties(SDL2::SDL2 PROPERTIES
+                    IMPORTED_LOCATION "${SDL2_LIB_FILE}"
+                    INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIRS}"
+                )
+                set(SDL2_IMPORTED_TARGET SDL2::SDL2)
+                message(STATUS "Using SDL2 from NuGet: ${SDL2_NUGET_PATH}")
+            endif()
+        else()
+            message(WARNING "SDL2 NuGet package not restored yet (expected under ${CMAKE_BINARY_DIR}/packages)")
+        endif()
+    endif()
+endif()
+
+if(NOT SDL2_IMPORTED_TARGET)
+    # Create a dummy interface target to keep include paths working even if SDL2 isn't available yet
+    if(NOT TARGET SDL2::SDL2)
+        add_library(SDL2::SDL2 INTERFACE IMPORTED)
+    endif()
+    set(SDL2_IMPORTED_TARGET SDL2::SDL2)
+endif()
+
+if(SDL2_LIBRARIES STREQUAL "" AND SDL2_IMPORTED_TARGET)
+    set(SDL2_LIBRARIES SDL2::SDL2)
+endif()
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
@@ -111,6 +164,41 @@ set(PORPOISE_SOURCES
     src/card/CARDStat.c
     src/card/CARDRename.c
     src/card/CARDBlock.c
+    
+    # MTX (Matrix Math)
+    src/mtx/mtx.c
+    
+    # GX (Graphics)
+    src/gx/GXManage.c
+    src/gx/GXBump.c
+    src/gx/GXCull.c
+    src/gx/GXExtra.c
+    src/gx/GXFifo.c
+    src/gx/GXFrameBuffer.c
+    src/gx/GXGeometry.c
+    src/gx/GXGet.c
+    src/gx/GXLighting.c
+    src/gx/GXVert.c
+    src/gx/GXPerf.c
+    src/gx/GXPixel.c
+    src/gx/GXTev.c
+    src/gx/GXTexture.c
+    src/gx/GXTransform.c
+    
+    # GX Graphics Backend
+    src/gfx/gx_state.c
+    src/gfx/gx_init.c
+    src/gfx/gx_helpers.c
+    src/gfx/gx_state_helpers.c
+    src/gfx/gx_update_state.c
+    
+    # Demo Library
+    src/demo/DEMOInit.c
+    src/demo/DEMOPad.c
+    src/demo/DEMOPuts.c
+    src/demo/DEMOWin.c
+    src/demo/DEMOStats.c
+    src/demo/DEMOFont.c
 )
 
 # Create library
@@ -119,6 +207,9 @@ if(PORPOISE_BUILD_SHARED)
 else()
     add_library(porpoise STATIC ${PORPOISE_SOURCES})
 endif()
+
+# Always build the PC-targeted path in our headers/source
+target_compile_definitions(porpoise PUBLIC TARGET_PC=1)
 
 # Set library properties
 set_target_properties(porpoise PROPERTIES
@@ -132,12 +223,39 @@ if(PORPOISE_USE_GECKO_MEMORY)
 endif()
 
 # Link SDL2
-target_link_libraries(porpoise PUBLIC ${SDL2_LIBRARIES})
+if(SDL2_FOUND)
+    target_link_libraries(porpoise PUBLIC ${SDL2_LIBRARIES})
+else()
+    # When SDL2_FOUND is false, use the interface target (NuGet will handle actual linking)
+    target_link_libraries(porpoise PUBLIC SDL2::SDL2)
+endif()
+
+# Link OpenGL (for GX graphics backend)
+if(WIN32)
+    # Windows: Use opengl32
+    target_link_libraries(porpoise PRIVATE opengl32)
+elseif(APPLE)
+    # macOS: Use framework
+    find_library(OPENGL_LIBRARY OpenGL)
+    target_link_libraries(porpoise PRIVATE ${OPENGL_LIBRARY})
+else()
+    # Linux: Use libGL
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(porpoise PRIVATE OpenGL::GL)
+endif()
 
 # Platform-specific settings
 if(WIN32)
     target_compile_definitions(porpoise PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_link_libraries(porpoise PRIVATE winmm)
+    
+    # Add SDL2 NuGet package reference for Visual Studio projects
+    if(MSVC)
+        set_target_properties(porpoise PROPERTIES
+            VS_PACKAGE_REFERENCES "SDL2;SDL2.redist"
+        )
+        message(STATUS "Added SDL2 NuGet package reference to porpoise target")
+    endif()
     
     # Explicitly exclude devkitPro paths on Windows
     # Note: devkitPro headers are incompatible with this PC port

@@ -1,0 +1,41 @@
+;
+; SPDEMO 
+; 
+; sndconv script test file
+;
+
+
+COMMENT SP Demo Application
+COMMENT (c) Copyright 2001 Nintendo Technology Development, Inc.
+COMMENT
+
+BEGIN SFX_MENU
+    FILE    menu.aif
+    OUTPUT  ADPCM
+END
+
+BEGIN SFX_DRUM
+    FILE    taiko.wav
+    OUTPUT  8BIT
+END
+
+BEGIN SFX_GUNSHOT
+    FILE    base_fire.wav
+    OUTPUT  16BIT
+END
+
+BEGIN VOICE_NGC_MAN
+    FILE    NintendoGameCubeMan.wav
+    OUTPUT  ADPCM
+END
+
+BEGIN VOICE_NGC_WOMAN
+    FILE    NintendoGameCubeWoman.wav
+    OUTPUT  ADPCM
+END
+
+BEGIN SFX_HONK_LOOPED
+    FILE    honk_looped.aif
+    OUTPUT  16BIT
+END
+

@@ -10,6 +10,7 @@
 #include <string.h>
 
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
 #include <unistd.h>
@@ -134,81 +135,6 @@ static void __fini_cpp(void) {
     }
 }
 #endif
-
-/*---------------------------------------------------------------------------*
-  Name:         abort
-
-  Description:  Abort the program immediately.
-                
-                On GC/Wii: Calls _ExitProcess() which halts CPU
-                On PC: Calls _ExitProcess() which exits the process
-
-  Arguments:    None
-
-  Returns:      Never returns
- *---------------------------------------------------------------------------*/
-void abort(void) {
-    _ExitProcess();
-}
-
-/*---------------------------------------------------------------------------*
-  Name:         exit
-
-  Description:  Exit the program normally.
-                
-                On GC/Wii: Calls destructors, then _ExitProcess()
-                On PC: Calls destructors, then _ExitProcess()
-
-  Arguments:    status  Exit code (0 = success, non-zero = error)
-
-  Returns:      Never returns
- *---------------------------------------------------------------------------*/
-void exit(int status) {
-    (void)status;  /* On PC, we use status, but games might not check it */
-
-#ifdef __cplusplus
-    /*
-     * Call C++ destructors before exiting
-     */
-    __fini_cpp();
-#endif
-
-    /*
-     * Exit the process
-     */
-    _ExitProcess();
-    
-    /* NOT REACHED */
-}
-
-/*---------------------------------------------------------------------------*
-  Name:         _ExitProcess
-
-  Description:  Terminate the program immediately.
-                
-                On GC/Wii: Halts the CPU (infinite loop or debugger break)
-                On PC: Exits the process using OS call
-
-  Arguments:    None
-
-  Returns:      Never returns
- *---------------------------------------------------------------------------*/
-void _ExitProcess(void) {
-    /* On PC, use standard exit() to terminate the process */
-    /* On Windows, ExitProcess() would be used, but exit() works everywhere */
-    
-#ifdef _WIN32
-    /* On Windows, use ExitProcess() for immediate termination */
-    /* This avoids calling destructors/atexit handlers */
-    ExitProcess(0);
-#else
-    /* On Unix-like systems, use _exit() for immediate termination */
-    /* This doesn't call atexit() handlers or flush stdio buffers */
-    _exit(0);
-#endif
-    
-    /* NOT REACHED */
-}
 
 /*---------------------------------------------------------------------------*
   Name:         __flush_cache

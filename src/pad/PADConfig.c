@@ -47,8 +47,11 @@
   stick_sensitivity=1.0
   c_stick_sensitivity=1.0
   rumble_intensity=0.5
-  
  *---------------------------------------------------------------------------*/
+
+#ifdef _WIN32
+#define strcasecmp _stricmp
+#endif
 
 #include <dolphin/pad.h>
 #include <dolphin/os.h>

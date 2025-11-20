@@ -139,14 +139,22 @@ u32 OSGetConsoleType(void) {
 void OSReport(const char* fmt, ...) {
     if (s_osReportInProgress) {
         /* Prevent infinite recursion if OSReport is triggered while already running */
+#ifdef _WIN32
+        OutputDebugStringA("[OSReport] Recursion detected!\n");
+#else
         fputs("[OSReport] Recursion detected!\n", stderr);
         fflush(stderr);
+#endif
         return;
     }
 
     if (!fmt) {
+#ifdef _WIN32
+        OutputDebugStringA("[OSReport] NULL format string\n");
+#else
         fputs("[OSReport] NULL format string\n", stderr);
         fflush(stderr);
+#endif
         return;
     }
 
@@ -180,8 +188,12 @@ void OSReport(const char* fmt, ...) {
     va_end(args);
 
     if (written < 0) {
+#ifdef _WIN32
+        OutputDebugStringA("[OSReport] Formatting error\n");
+#else
         fputs("[OSReport] Formatting error\n", stderr);
         fflush(stderr);
+#endif
         s_osReportInProgress = FALSE;
         return;
     }
@@ -193,9 +205,12 @@ void OSReport(const char* fmt, ...) {
 
 #ifdef _WIN32
     buffer[totalLen] = '\0';
+    /* Use Visual Studio debug output only - avoids console deadlock issues */
     OutputDebugStringA(buffer);
-#endif
+#else
     fwrite(buffer, 1, totalLen, stdout);
+    fflush(stdout);
+#endif
 
     s_osReportInProgress = FALSE;
 }

@@ -64,7 +64,7 @@ typedef int BOOL;
 
 /* Attribute macros */
 #ifdef _MSC_VER
-#define ATTRIBUTE_ALIGN(x)      __declspec(align(x))
+#define ATTRIBUTE_ALIGN(x)
 #define ATTRIBUTE_PACKED
 #else
 #define ATTRIBUTE_ALIGN(x)      __attribute__((aligned(x)))

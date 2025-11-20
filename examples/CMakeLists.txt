@@ -61,3 +61,34 @@ if(WIN32 AND MSVC)
     )
 endif()
 
+# gx_demo - GX graphics demo (based on Aurora's simple.c)
+add_executable(gx_demo gx_demo.c)
+target_link_libraries(gx_demo porpoise)
+target_include_directories(gx_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+if(WIN32 AND MSVC)
+    target_link_options(gx_demo PRIVATE "/SUBSYSTEM:CONSOLE")
+    set_target_properties(gx_demo PROPERTIES
+        VS_PACKAGE_REFERENCES "SDL2;SDL2.redist"
+    )
+endif()
+
+# onetri_demo - Official GameCube SDK onetri demo
+add_executable(onetri_demo onetri_demo.c)
+target_link_libraries(onetri_demo PRIVATE porpoise)
+target_include_directories(onetri_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+if(WIN32 AND MSVC)
+    # Force console subsystem (not Windows subsystem)
+    set_target_properties(onetri_demo PROPERTIES
+        WIN32_EXECUTABLE FALSE
+        VS_PACKAGE_REFERENCES "SDL2;SDL2.redist"
+    )
+    target_link_options(onetri_demo PRIVATE "/SUBSYSTEM:CONSOLE")
+endif()
+
+# Link SDL2 if found (porpoise should already link it, but ensure it's available)
+if(SDL2_FOUND)
+    target_link_libraries(onetri_demo PRIVATE SDL2::SDL2)
+endif()
+
