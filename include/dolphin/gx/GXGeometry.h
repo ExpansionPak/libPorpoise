@@ -20,11 +20,18 @@ void GXSetTexCoordGen2(GXTexCoordID dst_coord, GXTexGenType func, GXTexGenSrc sr
 void GXSetLineWidth(u8 width, GXTexOffset texOffsets);
 void GXSetPointSize(u8 pointSize, GXTexOffset texOffsets);
 void GXEnableTexOffsets(GXTexCoordID coord, GXBool line_enable, GXBool point_enable);
+/* Original GameCube SDK signature: 3 parameters (attr, base_ptr, stride) */
+/* This matches the original Nintendo SDK exactly */
+void GXSetArray(GXAttr attr, const void* base_ptr, u8 stride);
+
 #ifdef TARGET_PC
-void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride);
-#define GXSETARRAY(attr, data, size, stride) GXSetArray((attr), (data), (size), (stride))
+/* Aurora extension: 4 parameters (adds size for PC builds) */
+/* This is an Aurora-specific extension, not in the original SDK */
+void GXSetArray_4Param(GXAttr attr, const void* data, u32 size, u8 stride);
+/* Macro for Aurora-style 4-parameter calls */
+#define GXSETARRAY(attr, data, size, stride) GXSetArray_4Param((attr), (data), (size), (stride))
 #else
-void GXSetArray(GXAttr attr, const void* data, u8 stride);
+/* Original SDK macro - ignores size parameter */
 #define GXSETARRAY(attr, data, size, stride) GXSetArray((attr), (data), (stride))
 #endif
 void GXInvalidateVtxCache(void);

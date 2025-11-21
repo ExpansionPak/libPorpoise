@@ -459,10 +459,8 @@ void VIFlush(void) {
         }
     }
     
-    // Swap OpenGL buffers to display rendered frame
-    if (s_glContext) {
-        SDL_GL_SwapWindow(s_window);
-    }
+    // Don't swap here - swap is handled by DEMOSwapBuffers() after rendering
+    // This prevents double-swapping which causes flashing
 }
 
 /*---------------------------------------------------------------------------*

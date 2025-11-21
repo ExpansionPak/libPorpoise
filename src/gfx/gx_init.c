@@ -6,6 +6,8 @@
 
 #include "gx_state.h"
 #include "gx_helpers.h"
+#include "gx_shader.h"
+#include "gx_gl_loader.h"
 #include <dolphin/os.h>
 #include <SDL.h>
 
@@ -66,6 +68,9 @@ BOOL GXInitGraphics(void) {
         OSReport("GXInitGraphics: OpenGL Vendor: %s\n", glVendor);
     }
     
+    /* Load OpenGL 3.3 functions (Windows only) */
+    GXGLLoadFunctions();
+    
     /* Set default OpenGL state */
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
@@ -80,8 +85,12 @@ BOOL GXInitGraphics(void) {
     /* Clear color (black) */
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     
-    /* TODO: Create default buffers, shaders, etc. similar to Aurora */
-    /* For now, we just set up basic OpenGL state */
+    /* Initialize shader program */
+    GXShaderInit();
+    if (GXShaderGetProgram() == 0) {
+        OSReport("GXInitGraphics: Warning - Failed to create shader program\n");
+        /* Continue anyway - rendering will fail but won't crash */
+    }
     
     OSReport("GXInitGraphics: OpenGL backend initialized\n");
     
@@ -98,10 +107,11 @@ BOOL GXInitGraphics(void) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void GXShutdownGraphics(void) {
+    /* Shutdown shader program */
+    GXShaderShutdown();
+    
     /* Shutdown command queue */
     gfx_shutdown_command_queue();
-    
-    /* TODO: Cleanup OpenGL resources */
     
     GXStateShutdown();
     

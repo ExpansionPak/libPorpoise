@@ -133,6 +133,14 @@ void GXStateInit(void) {
         }
     }
     
+    /* Initialize projection matrix to identity (4x4) */
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            s_gxState.proj[r][c] = (r == c) ? 1.0f : 0.0f;
+        }
+    }
+    s_gxState.projType = 0;  /* Default projection type */
+    
     /* Initialize TEV stages (default: all zeros, matching Aurora) */
     s_gxState.numTevStages = 0;
     /* memset already zeroed the tevStages array */

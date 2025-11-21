@@ -249,6 +249,20 @@ DEFINE_EM_STUB(EmGXPosition1x8, (u8 index))
     
     /* Move to next attribute (similar to Aurora's next_attribute) */
     g_streamState->curAttr++;
+    
+    /* Count how many indexed attributes we have */
+    u32 numIndexedAttrs = 0;
+    for (GXAttr attr = 0; attr < GX_VA_MAX_ATTR; attr++) {
+        if (g_gxState->vtxDesc[attr] == GX_INDEX8 || g_gxState->vtxDesc[attr] == GX_INDEX16) {
+            numIndexedAttrs++;
+        }
+    }
+    
+    /* If we've received all attributes for this vertex, increment vertexCount */
+    if (numIndexedAttrs > 0 && g_streamState->curAttr >= numIndexedAttrs) {
+        g_streamState->vertexCount++;
+        g_streamState->curAttr = 0;  /* Reset for next vertex */
+    }
 }
 
 DEFINE_EM_STUB(EmGXNormal3f32, (f32 x, f32 y, f32 z))
@@ -365,6 +379,20 @@ DEFINE_EM_STUB(EmGXColor1x8, (u8 index))
     
     /* Move to next attribute (similar to Aurora's next_attribute) */
     g_streamState->curAttr++;
+    
+    /* Count how many indexed attributes we have */
+    u32 numIndexedAttrs = 0;
+    for (GXAttr attr = 0; attr < GX_VA_MAX_ATTR; attr++) {
+        if (g_gxState->vtxDesc[attr] == GX_INDEX8 || g_gxState->vtxDesc[attr] == GX_INDEX16) {
+            numIndexedAttrs++;
+        }
+    }
+    
+    /* If we've received all attributes for this vertex, increment vertexCount */
+    if (numIndexedAttrs > 0 && g_streamState->curAttr >= numIndexedAttrs) {
+        g_streamState->vertexCount++;
+        g_streamState->curAttr = 0;  /* Reset for next vertex */
+    }
 }
 
 DEFINE_EM_STUB(EmGXTexCoord2f32, (f32 s, f32 t))

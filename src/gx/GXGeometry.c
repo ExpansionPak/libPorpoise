@@ -104,14 +104,12 @@ void GXEnableTexOffsets(GXTexCoordID coord, GXBool line_enable, GXBool point_ena
     GX_STUB_NOTICE("GXEnableTexOffsets");
 }
 
-void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride) {
-    /* Copy from Aurora exactly: GXSetArray uses update_gx_state for each field */
-    /* Aurora's code:
-     *   auto& array = g_gxState.arrays[attr];
-     *   update_gx_state(array.data, data);
-     *   update_gx_state(array.size, size);
-     *   update_gx_state(array.stride, stride);
-     */
+/* 4-parameter version (TARGET_PC) - matches Aurora exactly */
+/* 3-parameter version (GameCube SDK standard) - matches original SDK exactly */
+void GXSetArray(GXAttr attr, const void* data, u8 stride) {
+    /* Original GameCube SDK signature: 3 parameters (attr, base_ptr, stride) */
+    /* Size is not provided - we infer it dynamically from the maximum index used during rendering */
+    /* This allows compatibility with unmodified demo code */
     
     if (attr >= GX_VA_MAX_ATTR) {
         OSReport("[GX ERROR] GXSetArray: Invalid attr %u\n", attr);
@@ -124,13 +122,40 @@ void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride) {
     }
     
     AttrArray* array = &state->arrays[attr];
-    if (array->data != data || array->size != size || array->stride != stride) {
+    if (array->data != data || array->stride != stride) {
         array->data = data;
-        array->size = size;
         array->stride = stride;
+        array->size = 0;  /* 0 = unknown size, will be inferred from max index during rendering */
         GXStateMarkDirty();
     }
 }
+
+#ifdef TARGET_PC
+/* 4-parameter version (Aurora extension) - for code that can be modified */
+/* This is provided for compatibility with Aurora-style code, but the 3-param version is preferred */
+void GXSetArray_4Param(GXAttr attr, const void* data, u32 size, u8 stride) {
+    /* Aurora extension: 4 parameters (adds size for explicit size specification) */
+    /* If size is provided, we use it; otherwise fall back to 3-param version */
+    
+    if (attr >= GX_VA_MAX_ATTR) {
+        OSReport("[GX ERROR] GXSetArray_4Param: Invalid attr %u\n", attr);
+        return;
+    }
+    
+    GXState* state = GXGetState();
+    if (!state) {
+        return;
+    }
+    
+    AttrArray* array = &state->arrays[attr];
+    if (array->data != data || array->size != size || array->stride != stride) {
+        array->data = data;
+        array->stride = stride;
+        array->size = size;  /* Use provided size, or 0 if unknown */
+        GXStateMarkDirty();
+    }
+}
+#endif
 
 void GXInvalidateVtxCache(void) {
     /* Copy from Aurora exactly: GXInvalidateVtxCache is a TODO/no-op */
@@ -213,7 +238,11 @@ void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
     g_streamState->curAttr = 0;
     g_streamState->active = TRUE;
     
-    /* Allocate vertex buffer */
+    /* Allocate vertex buffer - free old one first if it exists */
+    if (g_streamState->vertexBuffer) {
+        free(g_streamState->vertexBuffer);
+        g_streamState->vertexBuffer = NULL;
+    }
     u32 estimatedVerts = nVerts;
     g_streamState->vertexBufferCapacity = estimatedVerts * vertexSize;
     g_streamState->vertexBuffer = (u8*)malloc(g_streamState->vertexBufferCapacity);
@@ -231,6 +260,11 @@ void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
         g_streamState->indicesCapacity = (nVerts / 4) * 6;
     } else {
         g_streamState->indicesCapacity = nVerts;
+    }
+    /* Free old index buffer if it exists */
+    if (g_streamState->indices) {
+        free(g_streamState->indices);
+        g_streamState->indices = NULL;
     }
     g_streamState->indices = (u16*)malloc(g_streamState->indicesCapacity * sizeof(u16));
     if (g_streamState->indices == NULL) {
@@ -251,6 +285,7 @@ void GXEnd(void) {
     
     /* If no vertices, just reset (similar to Aurora) */
     if (g_streamState->vertexCount == 0) {
+        OSReport("[GX WARN] GXEnd: No vertices in stream\n");
         g_streamState->active = FALSE;
         return;
     }

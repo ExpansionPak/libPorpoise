@@ -189,6 +189,8 @@ set(PORPOISE_SOURCES
     src/gfx/gx_state.c
     src/gfx/gx_init.c
     src/gfx/gx_helpers.c
+    src/gfx/gx_shader.c
+    src/gfx/gx_gl_loader.c
     src/gfx/gx_state_helpers.c
     src/gfx/gx_update_state.c
     

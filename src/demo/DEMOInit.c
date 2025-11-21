@@ -12,8 +12,11 @@
 #include <dolphin/vi.h>
 #include <dolphin/gx.h>
 #include <dolphin/dvd.h>
+#include "../gfx/gx_helpers.h"  /* For gfx_begin_frame, gfx_end_frame, gfx_render */
+#include "../gfx/gx_gl.h"  /* For glFlush, glFinish */
 #include <string.h>
 #include <stdlib.h>
+#include <SDL.h>  /* For SDL_GL_SwapWindow */
 
 /*---------------------------------------------------------------------------*
  * Static variables
@@ -182,6 +185,9 @@ void DEMOStartVI(void)
 
 void DEMOBeforeRender(void)
 {
+    /* Begin frame (like Aurora's begin_frame()) */
+    gfx_begin_frame();
+    
     // Set up viewport
     if (Rmode->field_rendering)
     {
@@ -214,6 +220,10 @@ void DEMODoneRender(void)
     // Wait until everything is drawn and copied into XFB.
     GXDrawDone();
 
+    /* End frame and render (like Aurora's end_frame() and render()) */
+    gfx_end_frame();
+    gfx_render();
+
     // Set the next frame buffer
     DEMOSwapBuffers();
 }
@@ -235,6 +245,16 @@ void DEMOSwapBuffers(void)
     
     // Wait for vertical retrace.
     VIWaitForRetrace();
+    
+    // Ensure all OpenGL commands are flushed before swapping
+    glFlush();
+    glFinish();  // Wait for all rendering to complete
+    
+    // Swap OpenGL buffers after retrace (this presents the rendered frame)
+    SDL_Window* window = SDL_GL_GetCurrentWindow();
+    if (window) {
+        SDL_GL_SwapWindow(window);
+    }
     
     // Swap buffers
     if (DemoCurrentBuffer == DemoFrameBuffer1)
