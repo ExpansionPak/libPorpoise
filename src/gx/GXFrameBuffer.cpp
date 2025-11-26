@@ -3,6 +3,7 @@
 #include "../gfx/texture.hpp"
 #include "../gfx/gx_state.hpp"
 #include "../gfx/window.hpp"
+#include <dolphin/vi.h>
 
 extern "C" {
 GXRenderModeObj GXNtsc480IntDf = {

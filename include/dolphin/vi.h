@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 #include <dolphin/types.h>
+#include <dolphin/gx/gxstruct.h>
 
 /*---------------------------------------------------------------------------*
     Constants
@@ -97,10 +98,6 @@ typedef void (*VIRetraceCallback)(u32 retraceCount);
  */
 typedef void (*VIPositionCallback)(s16 x, s16 y);
 
-/**
- * @brief Render mode object (from GX, referenced by VI)
- */
-typedef struct GXRenderModeObj GXRenderModeObj;
 
 /*---------------------------------------------------------------------------*
     Functions
@@ -256,7 +253,7 @@ typedef struct SDL_Window SDL_Window;
 typedef void* SDL_GLContext;
 
 /**
- * @brief Get SDL window (for GX rendering)
+ * @brief Get SDL window
  * @return SDL_Window pointer
  */
 SDL_Window* VIGetSDLWindow(void);
