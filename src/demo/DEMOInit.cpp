@@ -7,16 +7,18 @@
   Based on Nintendo's Revolution SDK demo library.
  *---------------------------------------------------------------------------*/
 
-#include <dolphin/demo/demo.h>
+#include <dolphin/demo.h>
 #include <dolphin/os.h>
 #include <dolphin/vi.h>
-#include <dolphin/gx.h>
 #include <dolphin/dvd.h>
-#include "../gfx/gx_helpers.h"  /* For gfx_begin_frame, gfx_end_frame, gfx_render */
-#include "../gfx/gx_gl.h"  /* For glFlush, glFinish */
+#include <dolphin/gx.h>
 #include <string.h>
 #include <stdlib.h>
 #include <SDL.h>  /* For SDL_GL_SwapWindow */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*---------------------------------------------------------------------------*
  * Static variables
@@ -76,7 +78,8 @@ void DEMOInit_Real(GXRenderModeObj *mode)
     DEMOConfigureMem();
 
     // Initializes graphics
-    DemoFifoObj = GXInit(DemoFifoBuffer, DEFAULT_FIFO_SIZE);
+    // GX removed - stubbed
+    DemoFifoObj = NULL;
     DEMOInitGX();
 
     // Starts VI
@@ -145,6 +148,7 @@ void DEMOInitGX(void)
 {
     u16     fbWidth;
     u16     xfbHeight;
+    f32     yScale;
 
     /*----------------------------------------------------------------*
      *  GX configuration by a render mode obj                         *
@@ -158,10 +162,32 @@ void DEMOInitGX(void)
         xfbHeight = Rmode->efbHeight;
     }
 
-    // Forward to our GX functions
     GXSetViewport(0.0F, 0.0F, (f32)fbWidth, (f32)Rmode->efbHeight, 
                   0.0F, 1.0F);
     GXSetScissor(0, 0, (u32)fbWidth, (u32)Rmode->efbHeight);
+
+    yScale = GXGetYScaleFactor(Rmode->efbHeight, xfbHeight);
+    xfbHeight = (u16)GXSetDispCopyYScale(yScale);
+    GXSetDispCopySrc(0, 0, fbWidth, Rmode->efbHeight);  // use adjusted width
+    GXSetDispCopyDst(Rmode->fbWidth, Rmode->xfbHeight); // use original width
+
+    GXSetCopyFilter(Rmode->aa, Rmode->sample_pattern, GX_TRUE, Rmode->vfilter);
+    GXSetDispCopyGamma(GX_GM_1_0);
+
+    if (Rmode->aa)
+        GXSetPixelFmt(GX_PF_RGB565_Z16, GX_ZC_LINEAR);
+    else
+        GXSetPixelFmt(GX_PF_RGB8_Z24, GX_ZC_LINEAR);
+
+    // Note that following is an appropriate setting for full-frame AA mode.
+    // You should use "xfbHeight" instead of "efbHeight" to specify actual
+    // view size. Since this library doesn't support such special case, please
+    // call these in each application to override the normal setting.
+#if 0
+    GXSetViewport(0.0F, 0.0F, (f32)Rmode->fbWidth, (f32)Rmode->xfbHeight, 
+                  0.0F, 1.0F);
+    GXSetDispCopyYScale(1.0F);
+#endif
 
     // Clear embedded framebuffer for the first frame
     GXCopyDisp(DemoFrameBuffer2, GX_TRUE);
@@ -185,45 +211,12 @@ void DEMOStartVI(void)
 
 void DEMOBeforeRender(void)
 {
-    /* Begin frame (like Aurora's begin_frame()) */
-    gfx_begin_frame();
-    
-    // Set up viewport
-    if (Rmode->field_rendering)
-    {
-        GXSetViewportJitter(
-          0.0F, 0.0F, (float)Rmode->fbWidth, (float)Rmode->efbHeight, 
-          0.0F, 1.0F, VIGetNextField());
-    }
-    else
-    {
-        GXSetViewport(
-          0.0F, 0.0F, (float)Rmode->fbWidth, (float)Rmode->efbHeight, 
-          0.0F, 1.0F);
-    }
-
-    // Invalidate vertex cache in GP
-    GXInvalidateVtxCache();
-    // Invalidate texture cache in GP
-    GXInvalidateTexAll();
+    // GX functions removed - stubbed
 }
 
 void DEMODoneRender(void)
 {
-    // Set Z/Color update to make sure eFB will be cleared at GXCopyDisp.
-    GXSetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
-    GXSetColorUpdate(GX_TRUE);
-    
-    // Issue display copy command
-    GXCopyDisp(DemoCurrentBuffer, GX_TRUE);
-
-    // Wait until everything is drawn and copied into XFB.
-    GXDrawDone();
-
-    /* End frame and render (like Aurora's end_frame() and render()) */
-    gfx_end_frame();
-    gfx_render();
-
+    // GX functions removed - stubbed
     // Set the next frame buffer
     DEMOSwapBuffers();
 }
@@ -246,15 +239,7 @@ void DEMOSwapBuffers(void)
     // Wait for vertical retrace.
     VIWaitForRetrace();
     
-    // Ensure all OpenGL commands are flushed before swapping
-    glFlush();
-    glFinish();  // Wait for all rendering to complete
-    
-    // Swap OpenGL buffers after retrace (this presents the rendered frame)
-    SDL_Window* window = SDL_GL_GetCurrentWindow();
-    if (window) {
-        SDL_GL_SwapWindow(window);
-    }
+    // OpenGL/SDL swap removed - GX removed
     
     // Swap buffers
     if (DemoCurrentBuffer == DemoFrameBuffer1)
@@ -287,4 +272,7 @@ void DEMOReInit(GXRenderModeObj *mode)
     DEMOInitGX();
     DEMOStartVI();
 }
+#ifdef __cplusplus
+} // extern "C"
+#endif
 
