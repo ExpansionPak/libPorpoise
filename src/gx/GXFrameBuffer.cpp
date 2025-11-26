@@ -18,8 +18,21 @@ u32 __GXGetNumXfbLines(u32 efbHeight, u32 yScaleReg) {
   if (yScaleReg == 0) {
     return efbHeight;
   }
-  const u32 numerator = efbHeight * static_cast<u32>(kYScaleRegisterScale);
-  return (numerator + yScaleReg - 1u) / yScaleReg;
+
+  u32 count = (efbHeight - 1u) * static_cast<u32>(kYScaleRegisterScale);
+  u32 realHeight = count / yScaleReg + 1u;
+
+  u32 scaleDown = yScaleReg;
+  if (scaleDown > 0x80 && scaleDown < 0x100) {
+    while ((scaleDown & 0x1u) == 0u) {
+      scaleDown >>= 1u;
+    }
+    if ((efbHeight % scaleDown) == 0u) {
+      ++realHeight;
+    }
+  }
+
+  return std::min(realHeight, kMaxXfbLines);
 }
 
 u32 packYScaleRegister(f32 yScale) {
@@ -140,7 +153,15 @@ f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight) {
   return fScale;
 }
 
-// TODO GXGetNumXfbLines
+u16 GXGetNumXfbLines(u16 efbHeight, f32 yScale) {
+  ASSERT(yScale >= 1.0f, "GXGetNumXfbLines: Vertical scale must be >= 1.0");
+  if (efbHeight == 0) {
+    return 0;
+  }
+
+  const u32 reg = packYScaleRegister(yScale);
+  return static_cast<u16>(__GXGetNumXfbLines(efbHeight, reg));
+}
 // TODO GXClearBoundingBox
 // TODO GXReadBoundingBox
 }

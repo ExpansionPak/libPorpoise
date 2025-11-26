@@ -18,6 +18,7 @@ void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht);
 void GXSetDispCopyDst(u16 wd, u16 ht);
 u32 GXSetDispCopyYScale(f32 vscale);
 f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight);
+u16 GXGetNumXfbLines(u16 efbHeight, f32 yScale);
 void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]);
 void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt);
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht);
