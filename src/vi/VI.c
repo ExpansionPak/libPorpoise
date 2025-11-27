@@ -49,7 +49,6 @@
 #include <dolphin/VIConfig.h>
 #include <dolphin/os.h>
 #include <dolphin/os/OSAlarm.h>
-#include "../gfx/gx_init.h"  // For GXInitGraphics
 #include <SDL.h>
 #include <string.h>
 #include <stdlib.h>
@@ -312,17 +311,6 @@ void VIInit(void) {
     
     OSReport("VI: OpenGL context created successfully\n");
     
-    // Initialize GX graphics system (similar to Aurora's gfx::initialize())
-    // This must be called after OpenGL context is created
-    if (!GXInitGraphics()) {
-        OSReport("VI: ERROR - Failed to initialize GX graphics system\n");
-        SDL_GL_DeleteContext(s_glContext);
-        s_glContext = NULL;
-        SDL_DestroyWindow(s_window);
-        s_window = NULL;
-        SDL_QuitSubSystem(SDL_INIT_VIDEO);
-        return;
-    }
     
     // Set VSync from config
     if (SDL_GL_SetSwapInterval(s_config.vsync) < 0) {
@@ -552,16 +540,14 @@ void VISet3D(BOOL threeD) {
                 On GC/Wii: Configures VI registers from mode object
                 On PC: Stores mode information
 
-  Arguments:    rm  Pointer to GXRenderModeObj
+  Arguments:    rm  Pointer to GXRenderModeObj (stub type)
 
   Returns:      None
  *---------------------------------------------------------------------------*/
 void VIConfigure(const GXRenderModeObj* rm) {
     (void)rm;
     
-    /* On PC, the render mode is handled by GX module.
-     * VI just needs to know it was configured.
-     */
+    /* GX module removed - render mode handling stubbed */
 }
 
 /*---------------------------------------------------------------------------*

@@ -10,6 +10,19 @@ extern "C" {
 typedef s64 OSTime;
 typedef u32 OSTick;
 
+typedef struct OSCalendarTime {
+    int sec;
+    int min;
+    int hour;
+    int mday;
+    int mon;   /* 0-11 */
+    int year;
+    int wday;
+    int yday;
+    int msec;
+    int usec;
+} OSCalendarTime;
+
 #define OS_TIMER_CLOCK      40500000  // 40.5 MHz
 #define OS_BUS_CLOCK        162000000 // 162 MHz
 
@@ -29,10 +42,8 @@ OSTick OSGetTick(void);
 OSTime OSGetSystemTime(void);
 OSTime __OSGetSystemTime(void);  // Internal system time getter
 
-void   OSTicksToCalendarTime(OSTime ticks, u16* year, u8* month, u8* day,
-                             u8* hour, u8* minute, u8* second);
-OSTime OSCalendarTimeToTicks(u16 year, u8 month, u8 day,
-                             u8 hour, u8 minute, u8 second);
+void   OSTicksToCalendarTime(OSTime ticks, OSCalendarTime* timeDate);
+OSTime OSCalendarTimeToTicks(const OSCalendarTime* timeDate);
 
 #ifdef __cplusplus
 }

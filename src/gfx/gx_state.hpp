@@ -178,6 +178,9 @@ struct FogState {
   float nearZ = 0.f;
   float farZ = 0.f;
   aurora::Vec4<float> color{0.f, 0.f, 0.f, 1.f};
+  bool rangeAdjustEnabled = false;
+  u16 rangeAdjustCenter = 0;
+  std::array<u16, 10> rangeAdjustTable{};
 };
 
 struct TevStage {

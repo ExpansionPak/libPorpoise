@@ -30,6 +30,7 @@ typedef struct OSAlarm OSAlarm;
 #define DVD_RESULT_CANCELED     -3
 
 // DVD state codes
+#define DVD_STATE_FATAL_ERROR   -1
 #define DVD_STATE_END           0
 #define DVD_STATE_BUSY          1
 #define DVD_STATE_WAITING       2

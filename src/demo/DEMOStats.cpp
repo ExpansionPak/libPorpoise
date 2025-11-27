@@ -7,8 +7,11 @@
   Based on Nintendo's Revolution SDK demo library.
  *---------------------------------------------------------------------------*/
 
-#include <dolphin/demo/demo.h>
-#include <dolphin/gx/GXEnum.h>
+#include <dolphin/demo.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 GXBool DemoStatEnable = GX_FALSE;
 
@@ -16,4 +19,8 @@ void DEMOSetStats(DEMOStatObj* stat, u32 nstats, DEMOStatDispMode disp) {
     (void)stat; (void)nstats; (void)disp;
     // Stub - statistics display not implemented yet
 }
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
 

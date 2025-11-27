@@ -7,12 +7,16 @@
   Based on Nintendo's Revolution SDK demo library.
  *---------------------------------------------------------------------------*/
 
-#include <dolphin/demo/demo.h>
+#include <dolphin/demo.h>
 #include <dolphin/os.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Global window list */
 static DEMOWinInfo* s_windowList = NULL;
@@ -30,7 +34,7 @@ DEMOWinInfo* DEMOWinCreateWindow(s32 x1, s32 y1, s32 x2, s32 y2, char* caption, 
         win->y1 = y1;
         win->x2 = x2;
         win->y2 = y2;
-        win->caption = caption ? strdup(caption) : NULL;
+        win->caption = caption ? _strdup(caption) : NULL;
         win->refresh = (void(*)(DEMOWinInfo*))func;
     }
     return win; // Stub
@@ -178,4 +182,8 @@ s32 DEMOWinListMoveCursor(DEMOWinListInfo* list, u32 dir) {
     (void)list; (void)dir;
     return 0; // Stub
 }
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
 

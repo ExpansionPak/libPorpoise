@@ -127,20 +127,19 @@ Gets the lower 32 bits of the current time.
 
 **Returns:** Time tick value.
 
-#### `void OSTicksToCalendarTime(OSTime ticks, u16* year, u8* month, u8* day, u8* hour, u8* minute, u8* second)`
+#### `void OSTicksToCalendarTime(OSTime ticks, OSCalendarTime* timeDate)`
 
 Converts OS time to calendar time.
 
 **Example:**
 ```c
 OSTime time = OSGetTime();
-u16 year;
-u8 month, day, hour, minute, second;
+OSCalendarTime cal;
 
-OSTicksToCalendarTime(time, &year, &month, &day, 
-                     &hour, &minute, &second);
+OSTicksToCalendarTime(time, &cal);
 OSReport("Time: %04d-%02d-%02d %02d:%02d:%02d\n",
-         year, month, day, hour, minute, second);
+         cal.year, cal.mon + 1, cal.mday,
+         cal.hour, cal.min, cal.sec);
 ```
 
 ---

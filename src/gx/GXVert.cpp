@@ -1,0 +1,703 @@
+#include "gx.hpp"
+
+#include "../gfx/math.hpp"
+
+#include <cstring>
+#include <optional>
+
+struct Attribute {
+  uint32_t offset;
+  GXAttr attr;
+  GXAttrType type;
+  aurora::gfx::gx::VtxAttrFmt fmt;
+};
+
+struct SStreamState {
+  GXPrimitive primitive;
+  GXVtxFmt vtxFmt;
+  std::vector<Attribute> attrs;
+  u16 curAttr = 0;
+  u16 vertexCount = 0;
+  u16 vertexStart;
+  u16 vertexSize;
+  aurora::ByteBuffer vertexBuffer;
+  uint8_t* vertexData = nullptr;
+  std::vector<u16> indices;
+
+  explicit SStreamState(GXPrimitive primitive, GXVtxFmt vtxFmt, std::vector<Attribute> attrs, u16 numVerts,
+                        u16 vertexSize, u16 vertexStart) noexcept
+  : primitive(primitive), vtxFmt(vtxFmt), attrs(std::move(attrs)), vertexStart(vertexStart), vertexSize(vertexSize) {
+    vertexBuffer.reserve_extra(static_cast<size_t>(numVerts) * vertexSize);
+    if (numVerts > 3 && (primitive == GX_TRIANGLEFAN || primitive == GX_TRIANGLESTRIP)) {
+      indices.reserve(((static_cast<u32>(numVerts) - 3) * 3) + 3);
+    } else if (numVerts > 4 && primitive == GX_QUADS) {
+      indices.reserve(static_cast<u32>(numVerts) / 4 * 6);
+    } else {
+      indices.reserve(numVerts);
+    }
+  }
+
+  [[maybe_unused]] u8 check_direct(GXAttr attr, GXCompCnt cnt, GXCompType type) noexcept {
+    const auto& curAttr = attrs[this->curAttr];
+    ASSERT(curAttr.attr == attr, "bad attribute order: {}, expected {}", attr, curAttr.attr);
+    ASSERT(curAttr.type == GX_DIRECT, "bad attribute type: GX_DIRECT, expected {}", curAttr.type);
+    ASSERT(curAttr.fmt.cnt == cnt, "bad attribute count: {}, expected {}", cnt, curAttr.fmt.cnt);
+    ASSERT(curAttr.fmt.type == type, "bad attribute type: {}, expected {}", type, curAttr.fmt.type);
+    return curAttr.fmt.frac;
+  }
+
+  void check_indexed(GXAttr attr, GXAttrType type) noexcept {
+    const auto& curAttr = attrs[this->curAttr];
+    ASSERT(curAttr.attr == attr, "bad attribute order: {}, expected {}", attr, curAttr.attr);
+    ASSERT(curAttr.type == type, "bad attribute type: {}, expected {}", type, curAttr.type);
+  }
+
+  template <typename T>
+  void append(const T& value) noexcept {
+    append_data(&value, sizeof(value), attrs[curAttr].offset);
+    next_attribute();
+  }
+
+private:
+  void append_data(const void* ptr, size_t size, uint32_t offset) {
+    if (vertexData == nullptr) {
+      const auto vertexStart = vertexBuffer.size();
+      vertexBuffer.append_zeroes(vertexSize);
+      vertexData = vertexBuffer.data() + vertexStart;
+      inc_vertex_count();
+    }
+    ASSERT(offset + size <= vertexSize, "bad attribute end: {}, expected {}", offset + size, vertexSize);
+    memcpy(vertexData + offset, ptr, size);
+  }
+
+  void next_attribute() noexcept {
+    curAttr = curAttr + 1;
+    if (curAttr >= attrs.size()) {
+      curAttr = 0;
+      vertexData = nullptr;
+    }
+  }
+
+  void inc_vertex_count() noexcept {
+    auto curVertex = vertexStart + vertexCount;
+    if (primitive == GX_LINES || primitive == GX_LINESTRIP || primitive == GX_POINTS) {
+      // Currently unsupported, skip
+      return;
+    }
+    if (primitive == GX_TRIANGLES || primitive == GX_TRIANGLESTRIP || vertexCount < 3) {
+      // pass
+    } else if (primitive == GX_TRIANGLEFAN) {
+      indices.push_back(vertexStart);
+      indices.push_back(curVertex - 1);
+    } /*else if (primitive == GX_TRIANGLESTRIP) {
+      if ((vertexCount & 1) == 0) {
+        indices.push_back(curVertex - 2);
+        indices.push_back(curVertex - 1);
+      } else {
+        indices.push_back(curVertex - 1);
+        indices.push_back(curVertex - 2);
+      }
+    }*/
+    else if (primitive == GX_QUADS) {
+      if ((vertexCount & 3) == 3) {
+        indices.push_back(curVertex - 3);
+        indices.push_back(curVertex - 1);
+      }
+    }
+    indices.push_back(curVertex);
+    ++vertexCount;
+  }
+};
+
+static std::optional<SStreamState> sStreamState;
+static u16 lastVertexStart = 0;
+
+extern "C" {
+void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    const u8 fmtAndPrimitive = vtxFmt | primitive;
+    dlBuf->append(fmtAndPrimitive);
+    dlBuf->append(nVerts);
+    return;
+  }
+  CHECK(!sStreamState, "Stream began twice!");
+
+  uint16_t vertexSize = 0;
+  uint16_t numDirectAttrs = 0;
+  uint16_t numIndexedAttrs = 0;
+  for (GXAttr attr{}; const auto type : g_gxState.vtxDesc) {
+    if (type == GX_DIRECT) {
+      ++numDirectAttrs;
+      if (attr == GX_VA_POS || attr == GX_VA_NRM) {
+        vertexSize += 12;
+      } else if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
+        vertexSize += 16;
+      } else if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) {
+        vertexSize += 8;
+      } else
+        UNLIKELY { FATAL("dont know how to handle attr {}", attr); }
+    } else if (type == GX_INDEX8 || type == GX_INDEX16) {
+      ++numIndexedAttrs;
+    }
+    attr = static_cast<GXAttr>(attr + 1);
+  }
+  auto [num4xAttr, rem] = std::div(numIndexedAttrs, 4);
+  u32 num2xAttr = 0;
+  if (rem > 2) {
+    ++num4xAttr;
+  } else if (rem > 0) {
+    ++num2xAttr;
+  }
+  u32 directStart = num4xAttr * 8 + num2xAttr * 4;
+  vertexSize += directStart;
+
+  u32 indexOffset = 0;
+  u32 directOffset = directStart;
+  std::vector<Attribute> attrs;
+  attrs.reserve(numDirectAttrs + numIndexedAttrs);
+  const auto& curVtxFmt = g_gxState.vtxFmts[vtxFmt];
+  for (GXAttr attr{}; const auto type : g_gxState.vtxDesc) {
+    if (type == GX_DIRECT) {
+      u32 attrSize;
+      if (attr == GX_VA_POS || attr == GX_VA_NRM) {
+        attrSize = 12;
+      } else if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
+        attrSize = 16;
+      } else if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) {
+        attrSize = 8;
+      } else
+        UNLIKELY { FATAL("dont know how to handle attr {}", attr); }
+      const auto& attrFmt = curVtxFmt.attrs[attr];
+      attrs.emplace_back(directOffset, attr, type, attrFmt);
+      directOffset += attrSize;
+    } else if (type == GX_INDEX8 || type == GX_INDEX16) {
+      attrs.emplace_back(indexOffset, attr, type);
+      indexOffset += 2;
+    }
+    attr = static_cast<GXAttr>(attr + 1);
+  }
+
+  CHECK(vertexSize > 0, "no vtx attributes enabled?");
+  sStreamState.emplace(primitive, vtxFmt, std::move(attrs), nVerts, vertexSize,
+                       /*g_gxState.stateDirty ? 0 : lastVertexStart*/ 0);
+}
+
+void GXPosition3f32(f32 x, f32 y, f32 z) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(aurora::Vec3{x, y, z});
+  } else if (auto& stream = sStreamState) {
+    stream->check_direct(GX_VA_POS, GX_POS_XYZ, GX_F32);
+    stream->append(aurora::Vec3{x, y, z});
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXPosition3u16(u16 x, u16 y, u16 z) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(x);
+    dlBuf->append(y);
+    dlBuf->append(z);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XYZ, GX_U16);
+    stream->append(aurora::Vec3{
+        static_cast<f32>(x) / static_cast<f32>(1 << frac),
+        static_cast<f32>(y) / static_cast<f32>(1 << frac),
+        static_cast<f32>(z) / static_cast<f32>(1 << frac),
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXPosition3s16(s16 x, s16 y, s16 z) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(x);
+    dlBuf->append(y);
+    dlBuf->append(z);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XYZ, GX_S16);
+    stream->append(aurora::Vec3{
+        static_cast<f32>(x) / static_cast<f32>(1 << frac),
+        static_cast<f32>(y) / static_cast<f32>(1 << frac),
+        static_cast<f32>(z) / static_cast<f32>(1 << frac),
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXPosition3u8(u8 x, u8 y, u8 z) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(x);
+    dlBuf->append(y);
+    dlBuf->append(z);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XYZ, GX_U8);
+    stream->append(aurora::Vec3{
+        static_cast<f32>(x) / static_cast<f32>(1 << frac),
+        static_cast<f32>(y) / static_cast<f32>(1 << frac),
+        static_cast<f32>(z) / static_cast<f32>(1 << frac),
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXPosition3s8(s8 x, s8 y, s8 z) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(x);
+    dlBuf->append(y);
+    dlBuf->append(z);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XYZ, GX_S8);
+    stream->append(aurora::Vec3{
+        static_cast<f32>(x) / static_cast<f32>(1 << frac),
+        static_cast<f32>(y) / static_cast<f32>(1 << frac),
+        static_cast<f32>(z) / static_cast<f32>(1 << frac),
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXPosition2f32(f32 x, f32 y) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(aurora::Vec2{x, y});
+  } else if (auto& stream = sStreamState) {
+    stream->check_direct(GX_VA_POS, GX_POS_XY, GX_F32);
+    stream->append(aurora::Vec3{x, y, 0.f});
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXPosition2u16(u16 x, u16 y) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(x);
+    dlBuf->append(y);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XY, GX_U16);
+    stream->append(aurora::Vec3{
+        static_cast<f32>(x) / static_cast<f32>(1 << frac),
+        static_cast<f32>(y) / static_cast<f32>(1 << frac),
+        0.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXPosition2s16(s16 x, s16 y) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(x);
+    dlBuf->append(y);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XY, GX_S16);
+    stream->append(aurora::Vec3{
+        static_cast<f32>(x) / static_cast<f32>(1 << frac),
+        static_cast<f32>(y) / static_cast<f32>(1 << frac),
+        0.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXPosition2u8(u8 x, u8 y) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(x);
+    dlBuf->append(y);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XY, GX_U8);
+    stream->append(aurora::Vec3{
+        static_cast<f32>(x) / static_cast<f32>(1 << frac),
+        static_cast<f32>(y) / static_cast<f32>(1 << frac),
+        0.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXPosition2s8(s8 x, s8 y) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(x);
+    dlBuf->append(y);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XY, GX_S8);
+    stream->append(aurora::Vec3{
+        static_cast<f32>(x) / static_cast<f32>(1 << frac),
+        static_cast<f32>(y) / static_cast<f32>(1 << frac),
+        0.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXPosition1x16(u16 idx) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(idx);
+  } else if (auto& stream = sStreamState) {
+    stream->check_indexed(GX_VA_POS, GX_INDEX16);
+    stream->append<u16>(idx);
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXPosition1x8(u8 idx) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(idx);
+  } else if (auto& stream = sStreamState) {
+    stream->check_indexed(GX_VA_POS, GX_INDEX8);
+    stream->append<u16>(idx);
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXNormal3f32(f32 x, f32 y, f32 z) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(aurora::Vec3{x, y, z});
+  } else if (auto& stream = sStreamState) {
+    stream->check_direct(GX_VA_NRM, GX_NRM_XYZ, GX_F32);
+    stream->append(aurora::Vec3{x, y, z});
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXNormal3s16(s16 x, s16 y, s16 z) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(x);
+    dlBuf->append(y);
+    dlBuf->append(z);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_NRM, GX_NRM_XYZ, GX_S16);
+    stream->append(aurora::Vec3{
+        static_cast<f32>(x) / static_cast<f32>(1 << frac),
+        static_cast<f32>(y) / static_cast<f32>(1 << frac),
+        static_cast<f32>(z) / static_cast<f32>(1 << frac),
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXNormal3s8(s8 x, s8 y, s8 z) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(x);
+    dlBuf->append(y);
+    dlBuf->append(z);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_NRM, GX_NRM_XYZ, GX_S8);
+    stream->append(aurora::Vec3{
+        static_cast<f32>(x) / static_cast<f32>(1 << frac),
+        static_cast<f32>(y) / static_cast<f32>(1 << frac),
+        static_cast<f32>(z) / static_cast<f32>(1 << frac),
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXNormal1x16(u16 index) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(index);
+  } else if (auto& stream = sStreamState) {
+    stream->check_indexed(GX_VA_NRM, GX_INDEX16);
+    stream->append<u16>(index);
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXNormal1x8(u8 index) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(index);
+  } else if (auto& stream = sStreamState) {
+    stream->check_indexed(GX_VA_POS, GX_INDEX8);
+    stream->append<u16>(index);
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXColor4f32(f32 r, f32 g, f32 b, f32 a) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(aurora::Vec4{r, g, b, a});
+  } else if (auto& stream = sStreamState) {
+    stream->check_direct(GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8);
+    stream->append(aurora::Vec4{r, g, b, a});
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(r);
+    dlBuf->append(g);
+    dlBuf->append(b);
+    dlBuf->append(a);
+  } else if (auto& stream = sStreamState) {
+    stream->check_direct(GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8);
+    stream->append(aurora::Vec4{
+        static_cast<f32>(r) / 255.f,
+        static_cast<f32>(g) / 255.f,
+        static_cast<f32>(b) / 255.f,
+        static_cast<f32>(a) / 255.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXColor3u8(u8 r, u8 g, u8 b) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(r);
+    dlBuf->append(g);
+    dlBuf->append(b);
+  } else if (auto& stream = sStreamState) {
+    stream->check_direct(GX_VA_CLR0, GX_CLR_RGB, GX_RGB8);
+    stream->append(aurora::Vec4{
+        static_cast<f32>(r) / 255.f,
+        static_cast<f32>(g) / 255.f,
+        static_cast<f32>(b) / 255.f,
+        1.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXColor1u32(u32 clr) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(clr);
+  } else if (auto& stream = sStreamState) {
+    stream->check_direct(GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8);
+    stream->append(aurora::Vec4{
+        static_cast<f32>((clr >> 24) & 0xff) / 255.f,
+        static_cast<f32>((clr >> 16) & 0xff) / 255.f,
+        static_cast<f32>((clr >> 8) & 0xff) / 255.f,
+        static_cast<f32>(clr & 0xff) / 255.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXColor1u16(u16 clr) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(clr);
+  } else if (auto& stream = sStreamState) {
+    stream->check_direct(GX_VA_CLR0, GX_CLR_RGB, GX_RGB565);
+    stream->append(aurora::Vec4{
+        static_cast<f32>((clr >> 11) & 0x1f) / 31.f,
+        static_cast<f32>((clr >> 5) & 0x3f) / 63.f,
+        static_cast<f32>(clr & 0x1f) / 31.f,
+        1.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXColor1x16(u16 index) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(index);
+  } else if (auto& stream = sStreamState) {
+    stream->check_indexed(GX_VA_CLR0, GX_INDEX16);
+    stream->append<u16>(index);
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXColor1x8(u8 index) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(index);
+  } else if (auto& stream = sStreamState) {
+    stream->check_indexed(GX_VA_CLR0, GX_INDEX8);
+    stream->append<u16>(index);
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord2f32(f32 s, f32 t) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(aurora::Vec2{s, t});
+  } else if (auto& stream = sStreamState) {
+    stream->check_direct(GX_VA_TEX0, GX_TEX_ST, GX_F32);
+    stream->append(aurora::Vec2{s, t});
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord2u16(u16 s, u16 t) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(s);
+    dlBuf->append(t);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_ST, GX_U16);
+    stream->append(aurora::Vec2{
+        static_cast<f32>(s) / static_cast<f32>(1 << frac),
+        static_cast<f32>(t) / static_cast<f32>(1 << frac),
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord2s16(s16 s, s16 t) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(s);
+    dlBuf->append(t);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_ST, GX_S16);
+    stream->append(aurora::Vec2{
+        static_cast<f32>(s) / static_cast<f32>(1 << frac),
+        static_cast<f32>(t) / static_cast<f32>(1 << frac),
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord2u8(u8 s, u8 t) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(s);
+    dlBuf->append(t);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_ST, GX_U8);
+    stream->append(aurora::Vec2{
+        static_cast<f32>(s) / static_cast<f32>(1 << frac),
+        static_cast<f32>(t) / static_cast<f32>(1 << frac),
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord2s8(s8 s, s8 t) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(s);
+    dlBuf->append(t);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_ST, GX_S8);
+    stream->append(aurora::Vec2{
+        static_cast<f32>(s) / static_cast<f32>(1 << frac),
+        static_cast<f32>(t) / static_cast<f32>(1 << frac),
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord1f32(f32 s) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(s);
+  } else if (auto& stream = sStreamState) {
+    stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_F32);
+    stream->append(aurora::Vec2{s, 0.f});
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord1u16(u16 s) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(s);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_U16);
+    stream->append(aurora::Vec2{
+        static_cast<f32>(s) / static_cast<f32>(1 << frac),
+        0.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord1s16(s16 s) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(s);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_S16);
+    stream->append(aurora::Vec2{
+        static_cast<f32>(s) / static_cast<f32>(1 << frac),
+        0.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord1u8(u8 s) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(s);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_U8);
+    stream->append(aurora::Vec2{
+        static_cast<f32>(s) / static_cast<f32>(1 << frac),
+        0.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord1s8(s8 s) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(s);
+  } else if (auto& stream = sStreamState) {
+    const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_S8);
+    stream->append(aurora::Vec2{
+        static_cast<f32>(s) / static_cast<f32>(1 << frac),
+        0.f,
+    });
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord1x16(u16 index) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(index);
+  } else if (auto& stream = sStreamState) {
+    stream->check_indexed(GX_VA_TEX0, GX_INDEX16);
+    stream->append(index);
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXTexCoord1x8(u8 index) {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    dlBuf->append(index);
+  } else if (auto& stream = sStreamState) {
+    stream->check_indexed(GX_VA_TEX0, GX_INDEX8);
+    stream->append(static_cast<u16>(index));
+  } else {
+    FATAL("Stream function called with no stream or DL active");
+  }
+}
+
+void GXEnd() {
+  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+    // Display list recording - nothing else to do
+    return;
+  }
+
+  if (!sStreamState) {
+    return;
+  }
+
+  lastVertexStart = sStreamState->vertexStart + sStreamState->vertexCount;
+  sStreamState.reset();
+}
+}

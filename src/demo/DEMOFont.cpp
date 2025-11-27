@@ -7,8 +7,16 @@
   Based on Nintendo's Revolution SDK demo library.
  *---------------------------------------------------------------------------*/
 
-#include <dolphin/demo/demo.h>
+#include <dolphin/demo.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Font bitmap data - stub */
 u32 DEMOFontBitmap[1] = {0};
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(libPorpoise VERSION 0.1.0 LANGUAGES C CXX)
+project(libPorpoise VERSION 0.1.0 LANGUAGES CXX C)
 
 # Check for devkitPro and warn if found
 # devkitPro headers are incompatible with this PC port
@@ -15,14 +15,18 @@ if(DEFINED ENV{INCLUDE})
     endif()
 endif()
 
-# Set C/C++ standards
+# Set C/C++ standards - C++ is primary language
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Enable C++ features
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Options
 option(PORPOISE_BUILD_EXAMPLES "Build example programs" ON)
+option(PORPOISE_BUILD_PIKMIN_DEMO "Build the Pikmin demo target" OFF)
 option(PORPOISE_BUILD_SHARED "Build shared library" OFF)
 option(PORPOISE_USE_GECKO_MEMORY "Enable full memory emulation (locked cache support)" OFF)
 
@@ -168,42 +172,40 @@ set(PORPOISE_SOURCES
     # MTX (Matrix Math)
     src/mtx/mtx.c
     
-    # GX (Graphics)
-    src/gx/GXManage.c
-    src/gx/GXBump.c
-    src/gx/GXCull.c
-    src/gx/GXExtra.c
-    src/gx/GXFifo.c
-    src/gx/GXFrameBuffer.c
-    src/gx/GXGeometry.c
-    src/gx/GXGet.c
-    src/gx/GXLighting.c
-    src/gx/GXVert.c
-    src/gx/GXPerf.c
-    src/gx/GXPixel.c
-    src/gx/GXTev.c
-    src/gx/GXTexture.c
-    src/gx/GXTransform.c
+    # GX (Graphics) - C++ implementation (Aurora-compatible)
+    src/gx/GXBump.cpp
+    src/gx/GXCull.cpp
+    src/gx/GXDispList.cpp
+    src/gx/GXDraw.cpp
+    src/gx/GXExtra.cpp
+    src/gx/GXFifo.cpp
+    src/gx/GXFrameBuffer.cpp
+    src/gx/GXGeometry.cpp
+    src/gx/GXGet.cpp
+    src/gx/GXLighting.cpp
+    src/gx/GXManage.cpp
+    src/gx/GXPerf.cpp
+    src/gx/GXPixel.cpp
+    src/gx/GXTev.cpp
+    src/gx/GXTexture.cpp
+    src/gx/GXTransform.cpp
+    src/gx/GXVert.cpp
     
-    # GX Graphics Backend
-    src/gfx/gx_state.c
-    src/gfx/gx_init.c
-    src/gfx/gx_helpers.c
-    src/gfx/gx_shader.c
-    src/gfx/gx_gl_loader.c
-    src/gfx/gx_state_helpers.c
-    src/gfx/gx_update_state.c
+    # GX compatibility layer (replacing Aurora dependencies)
+    src/gfx/logging.cpp
+    src/gfx/texture.cpp
+    src/gfx/gx_state.cpp
     
     # Demo Library
-    src/demo/DEMOInit.c
-    src/demo/DEMOPad.c
-    src/demo/DEMOPuts.c
-    src/demo/DEMOWin.c
-    src/demo/DEMOStats.c
-    src/demo/DEMOFont.c
+    src/demo/DEMOInit.cpp
+    src/demo/DEMOPad.cpp
+    src/demo/DEMOPuts.cpp
+    src/demo/DEMOWin.cpp
+    src/demo/DEMOStats.cpp
+    src/demo/DEMOFont.cpp
 )
 
-# Create library
+# Create library - C++ primary, C files compiled as C++
 if(PORPOISE_BUILD_SHARED)
     add_library(porpoise SHARED ${PORPOISE_SOURCES})
 else()
@@ -213,10 +215,11 @@ endif()
 # Always build the PC-targeted path in our headers/source
 target_compile_definitions(porpoise PUBLIC TARGET_PC=1)
 
-# Set library properties
+# Set library properties - C++ is primary language
 set_target_properties(porpoise PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR}
+    LINKER_LANGUAGE CXX
 )
 
 # Enable full memory emulation if requested
@@ -230,20 +233,6 @@ if(SDL2_FOUND)
 else()
     # When SDL2_FOUND is false, use the interface target (NuGet will handle actual linking)
     target_link_libraries(porpoise PUBLIC SDL2::SDL2)
-endif()
-
-# Link OpenGL (for GX graphics backend)
-if(WIN32)
-    # Windows: Use opengl32
-    target_link_libraries(porpoise PRIVATE opengl32)
-elseif(APPLE)
-    # macOS: Use framework
-    find_library(OPENGL_LIBRARY OpenGL)
-    target_link_libraries(porpoise PRIVATE ${OPENGL_LIBRARY})
-else()
-    # Linux: Use libGL
-    find_package(OpenGL REQUIRED)
-    target_link_libraries(porpoise PRIVATE OpenGL::GL)
 endif()
 
 # Platform-specific settings
@@ -291,10 +280,15 @@ if(PORPOISE_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+if(PORPOISE_BUILD_PIKMIN_DEMO)
+    add_subdirectory(demos/PikminDemo)
+endif()
+
 # Print configuration
 message(STATUS "libPorpoise Configuration:")
 message(STATUS "  Version: ${PROJECT_VERSION}")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Library type: ${PORPOISE_BUILD_SHARED}")
 message(STATUS "  Build examples: ${PORPOISE_BUILD_EXAMPLES}")
+message(STATUS "  Build Pikmin demo: ${PORPOISE_BUILD_PIKMIN_DEMO}")
 message(STATUS "  Full memory emulation: ${PORPOISE_USE_GECKO_MEMORY}")

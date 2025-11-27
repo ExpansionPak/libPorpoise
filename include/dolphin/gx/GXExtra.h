@@ -1,6 +1,7 @@
 #ifndef DOLPHIN_GXEXTRA_H
 #define DOLPHIN_GXEXTRA_H
-
+// Extra types for PC
+#ifdef TARGET_PC
 #include <dolphin/gx/GXStruct.h>
 #include <dolphin/types.h>
 
@@ -8,8 +9,6 @@
 extern "C" {
 #endif
 
-// Extra types for PC
-#ifdef TARGET_PC
 typedef struct {
   float r;
   float g;
@@ -22,14 +21,14 @@ typedef enum {
   GX_TF_RGBA8_PC = 0x61,
 } GXPCTexFmt;
 
-void GXColor4f32(float r, float g, float b, float a);
-#endif
-
 void GXDestroyTexObj(GXTexObj* obj);
 void GXDestroyTlutObj(GXTlutObj* obj);
 
+void GXColor4f32(float r, float g, float b, float a);
+
 #ifdef __cplusplus
 }
+#endif
 #endif
 
 #endif

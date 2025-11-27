@@ -7,15 +7,16 @@
   Based on Nintendo's Revolution SDK demo library.
  *---------------------------------------------------------------------------*/
 
-#include <dolphin/demo/demo.h>
+#include <dolphin/demo.h>
 #include <dolphin/os.h>
-#include <dolphin/gx.h>
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
-/* Font bitmap (stub) */
-u32 DEMOFontBitmap[1] = {0};
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 void DEMOSetFontType(s32 type) {
     (void)type;
@@ -113,4 +114,8 @@ char* DEMODumpROMFont(char* string) {
     (void)string;
     return NULL; // Stub
 }
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
 

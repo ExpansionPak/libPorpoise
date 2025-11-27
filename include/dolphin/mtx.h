@@ -26,8 +26,16 @@ extern "C" {
 void MTXIdentity(Mtx m);
 void MTXConcat(const Mtx a, const Mtx b, Mtx ab);
 void MTXTrans(Mtx m, f32 xT, f32 yT, f32 zT);
+void MTXScale(Mtx m, f32 xS, f32 yS, f32 zS);
 void MTXLookAt(Mtx m, const Point3d* camPos, const Vec* camUp, const Point3d* target);
 void MTXFrustum(Mtx44 m, f32 t, f32 b, f32 l, f32 r, f32 n, f32 f);
+
+/* Paired-single helpers */
+void PSMTXIdentity(Mtx m);
+void PSMTXConcat(const Mtx a, const Mtx b, Mtx ab);
+void PSMTXTranspose(const Mtx src, Mtx dst);
+u32  PSMTXInverse(const Mtx src, Mtx inv);
+void PSMTXScale(Mtx m, f32 xS, f32 yS, f32 zS);
 
 #ifdef __cplusplus
 }

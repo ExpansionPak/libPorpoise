@@ -15,11 +15,11 @@ int main(void) {
     OSReport("Console type: 0x%08X\n", consoleType);
     
     // Convert time to calendar
-    u16 year;
-    u8 month, day, hour, minute, second;
-    OSTicksToCalendarTime(time, &year, &month, &day, &hour, &minute, &second);
+    OSCalendarTime cal = {0};
+    OSTicksToCalendarTime(time, &cal);
     OSReport("Calendar time: %04d-%02d-%02d %02d:%02d:%02d\n",
-             year, month, day, hour, minute, second);
+             cal.year, cal.mon + 1, cal.mday,
+             cal.hour, cal.min, cal.sec);
     
     OSReport("Simple example completed successfully!\n");
     

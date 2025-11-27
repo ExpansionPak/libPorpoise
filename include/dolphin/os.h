@@ -3,6 +3,7 @@
 
 #include "dolphin/types.h"
 #include "dolphin/os/OSTime.h"
+#include "dolphin/os/OSUtil.h"
 #include "dolphin/os/OSContext.h"
 #include "dolphin/os/OSThread.h"
 #include "dolphin/os/OSMutex.h"

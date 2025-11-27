@@ -59,7 +59,7 @@ void* DemoAllocator2 = NULL;
 void DEMOInit_Real(GXRenderModeObj *mode)
 {
     // Initializes OS.
-    // OSInit();    // called inside the startup routine.
+    OSInit();    // called inside the startup routine.
 
     // Initializes disc drive interface.
     DVDInit();      // Initializes disc.

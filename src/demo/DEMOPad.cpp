@@ -7,9 +7,13 @@
   Based on Nintendo's Revolution SDK demo library.
  *---------------------------------------------------------------------------*/
 
-#include <dolphin/demo/demo.h>
+#include <dolphin/demo.h>
 #include <dolphin/pad.h>
 #include <string.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*---------------------------------------------------------------------------*
    Global Variables
@@ -167,4 +171,8 @@ void DEMOPadInit(void)
     memset(DemoPad, 0, sizeof(DemoPad));
     DemoNumValidPads = 0;
 }
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
 

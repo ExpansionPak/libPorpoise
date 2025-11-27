@@ -34,6 +34,9 @@ extern "C" {
 #define PAD_CHAN2_BIT          0x20000000
 #define PAD_CHAN3_BIT          0x10000000
 
+// Channel count helper
+#define PAD_CHANMAX            PAD_MAX_CONTROLLERS
+
 // Button bits
 #define PAD_BUTTON_LEFT        0x0001
 #define PAD_BUTTON_RIGHT       0x0002
@@ -48,6 +51,9 @@ extern "C" {
 #define PAD_BUTTON_Y           0x0800
 #define PAD_BUTTON_START       0x1000
 #define PAD_BUTTON_MENU        PAD_BUTTON_START  // Alias
+
+// Minimum stick value to register directional input
+#define PAD_MIN_STICK_READ     32
 
 // Motor control commands
 #define PAD_MOTOR_STOP         0
@@ -69,6 +75,23 @@ extern "C" {
 #define PAD_MODE_5             5
 #define PAD_MODE_6             6
 #define PAD_MODE_7             7
+
+// Hardware specification presets
+#define PAD_SPEC_0             0
+#define PAD_SPEC_1             1
+#define PAD_SPEC_2             2
+#define PAD_SPEC_3             3
+#define PAD_SPEC_4             4
+#define PAD_SPEC_5             5
+
+// Button helper macros
+#define PADButtonDown(last, cur) ((u16)(((last) ^ (cur)) & (cur)))
+#define PADButtonUp(last, cur)   ((u16)(((last) ^ (cur)) & (last)))
+
+// Motor helper macros
+#define PADStartMotor(chan)      PADControlMotor((chan), PAD_MOTOR_RUMBLE)
+#define PADStopMotorHard(chan)   PADControlMotor((chan), PAD_MOTOR_STOP_HARD)
+#define PADStopMotor(chan)       PADControlMotor((chan), PAD_MOTOR_STOP)
 
 // Clamp types
 #define PAD_STICK_CLAMP_OCTA_WITH_MARGIN    0
@@ -241,6 +264,7 @@ void PADSetAnalogMode(u32 mode);
  * @param msec Desired sampling rate in milliseconds (ignored)
  */
 void PADSetSamplingRate(u32 msec);
+void PADSetSpec(u32 spec);
 
 /**
  * @brief Set sampling callback

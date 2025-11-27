@@ -21,9 +21,6 @@ typedef u8 GXBool;
 #define GX_ENABLE ((GXBool)1)
 #define GX_DISABLE ((GXBool)0)
 
-#define GX_MAX_VTXDESCLIST_SZ 32
-#define GX_MAX_VTXATTRFMTLIST_SZ 32
-
 typedef enum {
   GX_PERSPECTIVE,
   GX_ORTHOGRAPHIC,
@@ -271,6 +268,9 @@ typedef enum {
   GX_TG_SRTG,
 } GXTexGenType;
 
+#define GX_TG_MTX3X4 GX_TG_MTX3x4
+#define GX_TG_MTX2X4 GX_TG_MTX2x4
+
 typedef enum {
   GX_PNMTX0 = 0,
   GX_PNMTX1 = 3,
@@ -296,6 +296,7 @@ typedef enum {
   GX_TEXMTX8 = 54,
   GX_TEXMTX9 = 57,
   GX_IDENTITY = 60,
+  GX_TEXMTX_NULL = 0,
 } GXTexMtx;
 
 typedef enum {
@@ -356,6 +357,10 @@ typedef enum {
   GX_BL_DSTCLR = GX_BL_SRCCLR,
   GX_BL_INVDSTCLR = GX_BL_INVSRCCLR,
 } GXBlendFactor;
+
+#define GX_BL_INVSRCCOL GX_BL_INVSRCCLR
+#define GX_BL_DSTCOL GX_BL_DSTCLR
+#define GX_BL_INVDSTCOL GX_BL_INVDSTCLR
 
 typedef enum {
   GX_LO_CLEAR,
@@ -521,6 +526,8 @@ typedef enum _GXFogType {
   GX_FOG_REVEXP = GX_FOG_PERSP_REVEXP,
   GX_FOG_REVEXP2 = GX_FOG_PERSP_REVEXP2,
 } GXFogType;
+
+#define GX_FOG_LINEAR GX_FOG_LIN
 
 typedef enum {
   GX_CC_CPREV,

@@ -1,5 +1,5 @@
-#ifndef DOLPHIN_GXSTRUCT_H
-#define DOLPHIN_GXSTRUCT_H
+#ifndef DOLPHIN_GX_STRUCT_H
+#define DOLPHIN_GX_STRUCT_H
 
 #include <dolphin/types.h>
 #include <dolphin/gx/GXEnum.h>
@@ -8,82 +8,91 @@
 extern "C" {
 #endif
 
-typedef enum VITVMode VITVMode;
-typedef enum VIXFBMode VIXFBMode;
-
-struct GXRenderModeObj {
-  /*0x00*/ VITVMode viTVmode;
-  /*0x04*/ u16 fbWidth;
-  /*0x06*/ u16 efbHeight;
-  /*0x08*/ u16 xfbHeight;
-  /*0x0A*/ u16 viXOrigin;
-  /*0x0C*/ u16 viYOrigin;
-  /*0x0E*/ u16 viWidth;
-  /*0x10*/ u16 viHeight;
-  /*0x14*/ VIXFBMode xFBmode;
-  /*0x18*/ u8 field_rendering;
-  u8 aa;
-  u8 sample_pattern[12][2];
-  u8 vfilter[7];
-};
-typedef struct GXRenderModeObj GXRenderModeObj;
+#ifndef GX_RENDER_MODE_DEFINED
+#define GX_RENDER_MODE_DEFINED
+typedef struct {
+    u32 viTVmode;
+    u16 fbWidth;
+    u16 efbHeight;
+    u16 xfbHeight;
+    u16 viXOrigin;
+    u16 viYOrigin;
+    u16 viWidth;
+    u16 viHeight;
+    u32 xFBmode;
+    u8 field_rendering;
+    u8 aa;
+    u8 sample_pattern[12][2];
+    u8 vfilter[7];
+} GXRenderModeObj;
+#endif
 
 typedef struct {
-  u8 r;
-  u8 g;
-  u8 b;
-  u8 a;
+    u8 r;
+    u8 g;
+    u8 b;
+    u8 a;
 } GXColor;
 
 typedef struct {
+    s16 r;
+    s16 g;
+    s16 b;
+    s16 a;
+} GXColorS10;
+
 #ifdef TARGET_PC
-  u32 dummy[22];
+#define GX_TEXOBJ_DWORDS 16
+#define GX_TLUTOBJ_DWORDS 3
+#define GX_LIGHTOBJ_DWORDS 16
+#define GX_TEXREGION_DWORDS 8
 #else
-  u32 dummy[8];
+#define GX_TEXOBJ_DWORDS 8
+#define GX_TLUTOBJ_DWORDS 3
+#define GX_LIGHTOBJ_DWORDS 16
+#define GX_TEXREGION_DWORDS 4
 #endif
+
+typedef struct {
+    u32 data[GX_TEXOBJ_DWORDS];
 } GXTexObj;
 
 typedef struct {
-#ifdef TARGET_PC
-  u32 dummy[4];
-#else
-  u32 dummy[3];
-#endif
+    u32 data[GX_TLUTOBJ_DWORDS];
 } GXTlutObj;
 
 typedef struct {
-  u32 dummy[16];
+    u32 data[GX_LIGHTOBJ_DWORDS];
 } GXLightObj;
 
 typedef struct {
-  GXAttr attr;
-  GXAttrType type;
+    u32 data[GX_TEXREGION_DWORDS];
+} GXTexRegion;
+
+typedef struct {
+    u32 data[4];
+} GXTlutRegion;
+
+typedef struct {
+    GXAttr attr;
+    GXAttrType type;
 } GXVtxDescList;
 
 typedef struct {
-  GXAttr attr;
-  GXCompCnt cnt;
-  GXCompType type;
-  u8 frac;
+    GXAttr attr;
+    GXCompCnt cnt;
+    GXCompType type;
+    u8 frac;
 } GXVtxAttrFmtList;
 
 typedef struct {
-  s16 r;
-  s16 g;
-  s16 b;
-  s16 a;
-} GXColorS10;
+    u16 r[10];
+} GXFogAdjTable;
 
-typedef struct _GXTexRegion {
-  u32 dummy[4];
-} GXTexRegion;
-
-typedef struct _GXTlutRegion {
-  u32 dummy[4];
-} GXTlutRegion;
+typedef struct __GXFifoObj GXFifoObj;
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif
+#endif /* DOLPHIN_GX_STRUCT_H */

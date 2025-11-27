@@ -396,51 +396,53 @@ static int GetLeapDays(int year) {
 
   Returns:      None
  *---------------------------------------------------------------------------*/
-void OSTicksToCalendarTime(OSTime ticks, u16* year, u8* month, u8* day,
-                          u8* hour, u8* minute, u8* second) {
-    int days, secs;
-    OSTime d;
-    int yr, mon;
-    const int* md;
-    int n;
-    
-    /* Extract subsecond portion */
-    d = ticks % OSSecondsToTicks(1);
+void OSTicksToCalendarTime(OSTime ticks, OSCalendarTime* cal) {
+    if (!cal) {
+        return;
+    }
+
+    OSTime d = ticks % OSSecondsToTicks(1);
     if (d < 0) {
         d += OSSecondsToTicks(1);
     }
-    
-    /* Remove subsecond portion */
+
+    cal->usec = (int)(OSTicksToMicroseconds(d) % 1000);
+    cal->msec = (int)(OSTicksToMilliseconds(d) % 1000);
+
     ticks -= d;
-    
-    /* Convert to days and seconds */
-    days = (int)(OSTicksToSeconds(ticks) / 86400 + BIAS);
-    secs = (int)(OSTicksToSeconds(ticks) % 86400);
-    
+
+    int days = (int)(OSTicksToSeconds(ticks) / 86400 + BIAS);
+    int secs = (int)(OSTicksToSeconds(ticks) % 86400);
+
     if (secs < 0) {
         days -= 1;
         secs += 86400;
     }
-    
-    /* Calculate year from days */
+
+    int totalDays = days;
+    cal->wday = (totalDays + 6) % 7;
+
+    int yr;
+    int n;
     for (yr = days / 365; days < (n = GetLeapDays(yr) + 365 * yr); ) {
         --yr;
     }
-    days -= n;  /* Now days is day-of-year (0-based) */
-    
-    /* Calculate month and day */
-    md = IsLeapYear(yr) ? LeapYearDays : YearDays;
-    for (mon = 12; days < md[--mon]; ) {
-        /* Find correct month */
+    days -= n;
+
+    cal->year = yr;
+    cal->yday = days;
+
+    const int* md = IsLeapYear(yr) ? LeapYearDays : YearDays;
+    int mon = 12;
+    while (days < md[--mon]) {
+        /* find month */
     }
-    
-    /* Fill in results */
-    if (year)   *year   = (u16)yr;
-    if (month)  *month  = (u8)(mon + 1);  /* 1-12 */
-    if (day)    *day    = (u8)(days - md[mon] + 1);  /* 1-31 */
-    if (hour)   *hour   = (u8)(secs / 3600);
-    if (minute) *minute = (u8)((secs / 60) % 60);
-    if (second) *second = (u8)(secs % 60);
+    cal->mon = mon;
+    cal->mday = days - md[mon] + 1;
+
+    cal->hour = secs / 3600;
+    cal->min = (secs / 60) % 60;
+    cal->sec = secs % 60;
 }
 
 /*---------------------------------------------------------------------------*
@@ -466,8 +468,8 @@ void OSTicksToCalendarTime(OSTime ticks, u16* year, u8* month, u8* day,
 
   Returns:      Time in OS ticks (40.5 MHz)
  *---------------------------------------------------------------------------*/
-OSTime OSCalendarTimeToTicks(u16 year, u8 month, u8 day,
-                             u8 hour, u8 minute, u8 second) {
+static OSTime OSCalendarComponentsToTicks(u16 year, u8 month, u8 day,
+                                          u8 hour, u8 minute, u8 second) {
     OSTime secs;
     int days;
     
@@ -502,6 +504,28 @@ OSTime OSCalendarTimeToTicks(u16 year, u8 month, u8 day,
     return OSSecondsToTicks(secs);
 }
 
+OSTime OSCalendarTimeToTicks(const OSCalendarTime* timeDate) {
+    if (!timeDate) {
+        return 0;
+    }
+
+    u16 year = (u16)timeDate->year;
+    u8 month = (u8)(timeDate->mon + 1);
+    u8 day = (u8)timeDate->mday;
+    u8 hour = (u8)timeDate->hour;
+    u8 minute = (u8)timeDate->min;
+    u8 second = (u8)timeDate->sec;
+
+    OSTime ticks = OSCalendarComponentsToTicks(year, month, day, hour, minute, second);
+    if (timeDate->msec) {
+        ticks += OSMillisecondsToTicks(timeDate->msec);
+    }
+    if (timeDate->usec) {
+        ticks += OSMicrosecondsToTicks(timeDate->usec);
+    }
+    return ticks;
+}
+
 /*===========================================================================*
   DEBUG UTILITIES
  *===========================================================================*/
@@ -520,13 +544,12 @@ OSTime OSCalendarTimeToTicks(u16 year, u8 month, u8 day,
   Returns:      Pointer to buffer
  *---------------------------------------------------------------------------*/
 char* OSTimeToString(OSTime time, char* buffer) {
-    u16 year;
-    u8 month, day, hour, minute, second;
+    OSCalendarTime cal = {0};
+    OSTicksToCalendarTime(time, &cal);
     
-    OSTicksToCalendarTime(time, &year, &month, &day, &hour, &minute, &second);
-    
-    sprintf(buffer, "%04u-%02u-%02u %02u:%02u:%02u",
-            year, month, day, hour, minute, second);
+    sprintf(buffer, "%04d-%02d-%02d %02d:%02d:%02d",
+            cal.year, cal.mon + 1, cal.mday,
+            cal.hour, cal.min, cal.sec);
     
     return buffer;
 }
