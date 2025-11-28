@@ -99,7 +99,7 @@ include_directories(${SDL2_INCLUDE_DIRS})
 set(PORPOISE_SOURCES
     # Core OS
     src/os/OS.c
-    src/os/OSThread.c
+    src/os/OSThread.cpp
     src/os/OSMutex.c
     src/os/OSTime.c
     src/os/OSAlarm.c
@@ -195,6 +195,7 @@ set(PORPOISE_SOURCES
     src/gfx/logging.cpp
     src/gfx/texture.cpp
     src/gfx/gx_state.cpp
+    src/gfx/common.cpp
     
     # Demo Library
     src/demo/DEMOInit.cpp
@@ -225,6 +226,36 @@ set_target_properties(porpoise PROPERTIES
 # Enable full memory emulation if requested
 if(PORPOISE_USE_GECKO_MEMORY)
     target_compile_definitions(porpoise PUBLIC PORPOISE_USE_GECKO_MEMORY)
+endif()
+
+# Find OpenGL (for GX viewport and rendering)
+find_package(OpenGL QUIET)
+if(OpenGL_FOUND)
+    target_link_libraries(porpoise PUBLIC OpenGL::GL)
+    message(STATUS "Found OpenGL via find_package")
+else()
+    # Fallback: link OpenGL libraries directly
+    if(WIN32)
+        target_link_libraries(porpoise PRIVATE opengl32)
+        message(STATUS "Linking OpenGL via opengl32")
+    elseif(APPLE)
+        find_library(OPENGL_LIBRARY OpenGL)
+        if(OPENGL_LIBRARY)
+            target_link_libraries(porpoise PRIVATE ${OPENGL_LIBRARY})
+            message(STATUS "Found OpenGL library: ${OPENGL_LIBRARY}")
+        else()
+            message(WARNING "OpenGL library not found on macOS")
+        endif()
+    else()
+        # Linux - try to find GL library
+        find_library(OPENGL_LIBRARY GL)
+        if(OPENGL_LIBRARY)
+            target_link_libraries(porpoise PRIVATE ${OPENGL_LIBRARY})
+            message(STATUS "Found OpenGL library: ${OPENGL_LIBRARY}")
+        else()
+            message(WARNING "OpenGL library not found. GX viewport functions may not work.")
+        endif()
+    endif()
 endif()
 
 # Link SDL2

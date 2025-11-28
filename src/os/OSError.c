@@ -66,8 +66,8 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Exception error handler table */
-static OSErrorHandler s_errorHandlers[OS_ERROR_MAX] = {NULL};
+/* Exception error handler table - exported as __OSErrorTable for compatibility */
+OSErrorHandler __OSErrorTable[OS_ERROR_MAX] = {NULL};
 
 /* FPSCR enable bits - controls which floating-point exceptions trigger */
 u32 __OSFpscrEnableBits = 0;
@@ -124,8 +124,8 @@ OSErrorHandler OSSetErrorHandler(OSError error, OSErrorHandler handler) {
         return NULL;
     }
     
-    OSErrorHandler old = s_errorHandlers[error];
-    s_errorHandlers[error] = handler;
+    OSErrorHandler old = __OSErrorTable[error];
+    __OSErrorTable[error] = handler;
     
     /* Log handler installation for debugging */
     if (handler != NULL) {
@@ -202,9 +202,9 @@ void __OSUnhandledException(__OSException exception, OSContext* context,
     OSReport("----------------------------------------------------\n");
     
     /* Check if there's a user handler */
-    if (exception < OS_ERROR_MAX && s_errorHandlers[exception]) {
+    if (exception < OS_ERROR_MAX && __OSErrorTable[exception]) {
         OSReport("User error handler is set but exception still unhandled\n");
-        OSReport("Handler address: %p\n", s_errorHandlers[exception]);
+        OSReport("Handler address: %p\n", __OSErrorTable[exception]);
         OSReport("\n");
         
         /* On PC, we could try calling the handler for debugging,
@@ -300,7 +300,7 @@ OSErrorHandler __OSGetErrorHandler(OSError error) {
     if (error >= OS_ERROR_MAX) {
         return NULL;
     }
-    return s_errorHandlers[error];
+    return __OSErrorTable[error];
 }
 
 /*---------------------------------------------------------------------------*

@@ -56,7 +56,7 @@ void* DemoAllocator2 = NULL;
  * Functions
  *---------------------------------------------------------------------------*/
 
-void DEMOInit_Real(GXRenderModeObj *mode)
+void DEMOInit(GXRenderModeObj *mode)
 {
     // Initializes OS.
     OSInit();    // called inside the startup routine.
@@ -84,11 +84,6 @@ void DEMOInit_Real(GXRenderModeObj *mode)
 
     // Starts VI
     DEMOStartVI();
-}
-
-void DEMOInit(GXRenderModeObj *mode)
-{
-    DEMOInit_Real(mode);
 }
 
 void DEMOSetRenderMode(GXRenderModeObj* mode)

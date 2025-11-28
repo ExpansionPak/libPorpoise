@@ -110,3 +110,39 @@ void OSSignalCond(OSCond* cond) {
     OSWakeupThread(&cond->queue);
 }
 
+/*---------------------------------------------------------------------------*
+  Name:         __OSUnlockAllMutex
+  
+  Description:  Unlocks all mutexes held by a thread. Used when thread
+                terminates to clean up resources.
+  
+  Arguments:    thread - Thread whose mutexes should be unlocked
+  
+  Returns:      None
+ *---------------------------------------------------------------------------*/
+void __OSUnlockAllMutex(OSThread* thread) {
+    if (!thread) return;
+    
+    OSMutex* mutex;
+    
+    // Unlock all mutexes in the thread's queue
+    while (thread->queueMutex.head) {
+        mutex = thread->queueMutex.head;
+        
+        // Remove from thread's mutex queue
+        thread->queueMutex.head = mutex->link.next;
+        if (mutex->link.next) {
+            mutex->link.next->link.prev = NULL;
+        } else {
+            thread->queueMutex.tail = NULL;
+        }
+        
+        // Clear mutex ownership
+        mutex->count = 0;
+        mutex->thread = NULL;
+        
+        // Wake waiting threads
+        OSWakeupThread(&mutex->queue);
+    }
+}
+

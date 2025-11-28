@@ -23,6 +23,28 @@ extern void __init_user(void);
 extern void __flush_cache(void* address, unsigned int size);
 
 /*---------------------------------------------------------------------------*
+    Stack Symbols for Default Thread
+    
+    On PowerPC, these are linker symbols pointing to the stack region.
+    On PC, we provide static storage for the default thread stack.
+ *---------------------------------------------------------------------------*/
+
+/* Default thread stack - 64KB should be enough */
+#define DEFAULT_STACK_SIZE (64 * 1024)
+static u8 s_defaultStack[DEFAULT_STACK_SIZE];
+
+/* Export stack symbols for default thread
+ * On PowerPC, these are linker symbols. On PC, we define them here.
+ * They're declared as arrays in OSThread.cpp (extern u8 _stack_addr[], etc.)
+ * 
+ * Stack grows DOWN, so:
+ * - _stack_addr is the TOP (high address) = end of array
+ * - _stack_end is the BOTTOM (low address) = start of array
+ */
+u8* _stack_addr = s_defaultStack + DEFAULT_STACK_SIZE;  /* Top of stack */
+u8* _stack_end = s_defaultStack;                         /* Bottom of stack */
+
+/*---------------------------------------------------------------------------*
     Function Declarations
  *---------------------------------------------------------------------------*/
 
