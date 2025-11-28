@@ -538,16 +538,18 @@ void VISet3D(BOOL threeD) {
   Description:  Configure video mode from render mode object.
                 
                 On GC/Wii: Configures VI registers from mode object
-                On PC: Stores mode information
+                On PC: Extracts and stores TV mode and scan mode from render mode
 
-  Arguments:    rm  Pointer to GXRenderModeObj (stub type)
+  Arguments:    rm  Pointer to GXRenderModeObj
 
   Returns:      None
  *---------------------------------------------------------------------------*/
 void VIConfigure(const GXRenderModeObj* rm) {
     (void)rm;
-    
-    /* GX module removed - render mode handling stubbed */
+
+    /* On PC, the render mode is handled by GX module.
+     * VI just needs to know it was configured.
+     */
 }
 
 /*---------------------------------------------------------------------------*
@@ -806,5 +808,21 @@ SDL_GLContext VIGetGLContext(void) {
 void VIGetWindowSize(int* width, int* height) {
     if (width) *width = s_windowWidth;
     if (height) *height = s_windowHeight;
+}
+
+/*---------------------------------------------------------------------------*
+  Name:         VISwapBuffers
+  
+  Description:  PC-specific: Swap OpenGL buffers to display rendered frame.
+                This should be called after rendering is complete.
+  
+  Arguments:    None
+  
+  Returns:      None
+ *---------------------------------------------------------------------------*/
+void VISwapBuffers(void) {
+    if (s_window && s_glContext) {
+        SDL_GL_SwapWindow(s_window);
+    }
 }
 

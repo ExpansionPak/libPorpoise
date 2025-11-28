@@ -211,7 +211,18 @@ void DEMOBeforeRender(void)
 
 void DEMODoneRender(void)
 {
-    // GX functions removed - stubbed
+    // Set Z/Color update to make sure eFB will be cleared at GXCopyDisp.
+    // (If you want to control these modes by yourself in your application,
+    //  please comment out this part.)
+    GXSetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+    GXSetColorUpdate(GX_TRUE);
+    
+    // Issue display copy command
+    GXCopyDisp(DemoCurrentBuffer, GX_TRUE);
+
+    // Wait until everything is drawn and copied into XFB.
+    GXDrawDone();
+
     // Set the next frame buffer
     DEMOSwapBuffers();
 }
@@ -234,7 +245,9 @@ void DEMOSwapBuffers(void)
     // Wait for vertical retrace.
     VIWaitForRetrace();
     
-    // OpenGL/SDL swap removed - GX removed
+    // Swap OpenGL buffers to display the rendered frame
+    // This must be called after rendering is complete
+    VISwapBuffers();
     
     // Swap buffers
     if (DemoCurrentBuffer == DemoFrameBuffer1)

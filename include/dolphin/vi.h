@@ -271,6 +271,14 @@ SDL_GLContext VIGetGLContext(void);
  */
 void VIGetWindowSize(int* width, int* height);
 
+/**
+ * @brief Swap OpenGL buffers (PC-specific)
+ * 
+ * Swaps the back buffer to front to display the rendered frame.
+ * Should be called after rendering is complete.
+ */
+void VISwapBuffers(void);
+
 /*---------------------------------------------------------------------------*
     Internal Functions
  *---------------------------------------------------------------------------*/

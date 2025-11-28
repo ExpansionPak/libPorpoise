@@ -5,6 +5,18 @@
 #include "../gfx/window.hpp"
 #include <dolphin/vi.h>
 
+// OpenGL includes
+#ifdef _WIN32
+#include <windows.h>
+#endif
+#ifdef __APPLE__
+#include <OpenGL/gl.h>
+#else
+#include <GL/gl.h>
+#endif
+#include <cstring>
+#include <vector>
+
 namespace {
 
 constexpr u32 kMaxXfbLines = 1024;
@@ -32,7 +44,7 @@ u32 __GXGetNumXfbLines(u32 efbHeight, u32 yScaleReg) {
     }
   }
 
-  return std::min(realHeight, kMaxXfbLines);
+  return (std::min)(realHeight, kMaxXfbLines);
 }
 
 u32 packYScaleRegister(f32 yScale) {
@@ -63,7 +75,7 @@ GXRenderModeObj GXMpal480IntDf = {
 
 void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor, u16 ver) {
   *rmout = *rmin;
-  const auto size = aurora::window::get_window_size();
+  const auto size = porpoise::window::get_window_size();
   rmout->fbWidth = size.fb_width;
   rmout->efbHeight = size.fb_height;
   rmout->xfbHeight = size.fb_height;
@@ -102,7 +114,56 @@ void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[
 
 void GXSetDispCopyGamma(GXGamma gamma) {}
 
-void GXCopyDisp(void* dest, GXBool clear) {}
+// Convert RGBA8 to RGB565
+static inline u16 rgba8_to_rgb565(u8 r, u8 g, u8 b) {
+    // RGB565: RRRRR GGGGGG BBBBB
+    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+}
+
+void GXCopyDisp(void* dest, GXBool clear) {
+    if (!dest) return;
+    
+    // Get copy dimensions (set by GXSetDispCopySrc)
+    u16 width = s_dispCopyWidth;
+    u16 height = s_dispCopyHeight;
+    
+    // If dimensions not set, use default viewport size
+    if (width == 0 || height == 0) {
+        const auto windowSize = porpoise::window::get_window_size();
+        width = windowSize.fb_width;
+        height = windowSize.fb_height;
+    }
+    
+    // If clear is requested, clear the OpenGL framebuffer with the clear color
+    // This matches GameCube behavior where GXCopyDisp clears the EFB before copying
+    if (clear) {
+        const auto& clearColor = g_gxState.clearColor;
+        glClearColor(clearColor.x(), clearColor.y(), clearColor.z(), clearColor.w());
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    }
+    
+    // Read pixels from OpenGL framebuffer (RGBA8 format)
+    // Note: OpenGL reads from bottom-left, but we want top-left
+    // So we read the entire buffer and flip it
+    std::vector<u8> rgbaBuffer(width * height * 4);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgbaBuffer.data());
+    
+    // Convert RGBA8 to RGB565 and write to destination
+    // Flip vertically (OpenGL is bottom-up, GameCube is top-down)
+    u16* dest16 = static_cast<u16*>(dest);
+    for (u16 y = 0; y < height; ++y) {
+        u16 srcY = height - 1 - y; // Flip Y coordinate
+        const u8* srcRow = rgbaBuffer.data() + (srcY * width * 4);
+        u16* destRow = dest16 + (y * width);
+        
+        for (u16 x = 0; x < width; ++x) {
+            u8 r = srcRow[x * 4 + 0];
+            u8 g = srcRow[x * 4 + 1];
+            u8 b = srcRow[x * 4 + 2];
+            destRow[x] = rgba8_to_rgb565(r, g, b);
+        }
+    }
+}
 
 void GXCopyTex(void* dest, GXBool clear) {
   const auto& rect = g_gxState.texCopySrc;
@@ -111,12 +172,12 @@ void GXCopyTex(void* dest, GXBool clear) {
   if (it == g_gxState.copyTextures.end() || 
       it->second->width != rect.width || 
       it->second->height != rect.height) {
-    handle = aurora::gfx::new_render_texture(rect.width, rect.height, g_gxState.texCopyFmt, "Resolved Texture");
+    handle = porpoise::gfx::new_render_texture(rect.width, rect.height, g_gxState.texCopyFmt, "Resolved Texture");
     g_gxState.copyTextures[dest] = handle;
   } else {
     handle = it->second;
   }
-  aurora::gfx::resolve_pass(*handle, rect, clear, g_gxState.clearColor);
+  porpoise::gfx::resolve_pass(*handle, rect, clear, g_gxState.clearColor);
 }
 
 f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight) {
