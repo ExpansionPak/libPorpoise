@@ -94,6 +94,7 @@ static std::vector<uint8_t> g_vertexBuffer;
 static std::vector<uint8_t> g_indexBuffer;
 static std::vector<DrawData> g_drawCommands;
 static bool g_lastFrameByBridge = false;
+static bool g_rendered_this_frame = false;
 
 // OpenGL VBOs for vertex and index data
 static GLuint g_vertexVBO = 0;
@@ -188,6 +189,7 @@ void push_draw_command(const DrawData& data) {
 // Clear all queued commands (called at start of frame)
 void begin_frame() {
   g_lastFrameByBridge = false;
+  g_rendered_this_frame = false;
   g_drawCommands.clear();
   g_vertexBuffer.clear();
   g_indexBuffer.clear();
@@ -287,6 +289,7 @@ void render() {
   // legacy OpenGL execution for this frame.
   if (bridge::render(g_vertexBuffer, g_indexBuffer, g_gxState)) {
     g_lastFrameByBridge = true;
+    g_rendered_this_frame = true;
     return;
   }
 
@@ -841,6 +844,14 @@ void render() {
   if (glBindBuffer) {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+  }
+
+  g_rendered_this_frame = true;
+}
+
+void flush_render_if_pending() {
+  if (!g_rendered_this_frame && !g_drawCommands.empty()) {
+    render();
   }
 }
 

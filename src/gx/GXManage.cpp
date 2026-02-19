@@ -1,5 +1,7 @@
 #include "gx.hpp"
 
+#include "../gfx/render.hpp"
+
 extern "C" {
 static GXDrawDoneCallback DrawDoneCB = nullptr;
 
@@ -10,7 +12,10 @@ GXFifoObj* GXInit(void* base, u32 size) { return NULL; }
 // TODO GXReadDrawSync
 // TODO GXSetDrawSyncCallback
 
-void GXDrawDone() { if (DrawDoneCB != nullptr) DrawDoneCB(); }
+void GXDrawDone() {
+  porpoise::gfx::flush_render_if_pending();
+  if (DrawDoneCB != nullptr) DrawDoneCB();
+}
 
 void GXSetDrawDone() { if (DrawDoneCB != nullptr) DrawDoneCB(); }
 

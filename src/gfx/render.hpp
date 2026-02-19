@@ -50,6 +50,9 @@ void push_draw_command(const DrawData& data);
 void render();
 bool did_render_with_bridge();
 
+// Flush pending draws if any (for apps that call GXDrawDone without DEMODoneRender)
+void flush_render_if_pending();
+
 // Clear all queued commands (called at start of frame)
 void begin_frame();
 
