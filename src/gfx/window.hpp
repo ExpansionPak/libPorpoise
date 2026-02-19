@@ -1,19 +1,24 @@
 #pragma once
 
-// Stub window interface for libPorpoise
-// To be implemented with actual windowing system
+// Window interface for libPorpoise
+// Provides access to SDL2 window information via VI module
 
-namespace aurora::window {
+#include <dolphin/types.h>
+#include <dolphin/vi.h>
+
+namespace porpoise::window {
 
 struct WindowSize {
-  u16 fb_width = 640;
-  u16 fb_height = 480;
+  u16 fb_width;
+  u16 fb_height;
 };
 
 inline WindowSize get_window_size() {
-  // TODO: Implement with actual windowing system
-  return WindowSize{640, 480};
+  int width = 640;
+  int height = 480;
+  VIGetWindowSize(&width, &height);
+  return {static_cast<u16>(width), static_cast<u16>(height)};
 }
 
-} // namespace aurora::window
+} // namespace porpoise::window
 

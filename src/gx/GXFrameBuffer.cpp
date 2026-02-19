@@ -2,7 +2,9 @@
 
 #include "../gfx/texture.hpp"
 #include "../gfx/gx_state.hpp"
+#include "../gfx/rust_renderer_bridge.hpp"
 #include "../gfx/window.hpp"
+#include <dolphin/os.h>
 #include <dolphin/vi.h>
 
 // OpenGL includes
@@ -122,6 +124,7 @@ static inline u16 rgba8_to_rgb565(u8 r, u8 g, u8 b) {
 
 void GXCopyDisp(void* dest, GXBool clear) {
     if (!dest) return;
+    porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Copy);
     
     // Get copy dimensions (set by GXSetDispCopySrc)
     u16 width = s_dispCopyWidth;
@@ -134,6 +137,18 @@ void GXCopyDisp(void* dest, GXBool clear) {
         height = windowSize.fb_height;
     }
     
+    if (porpoise::gfx::bridge::copy_disp(dest, width, height, clear, g_gxState)) {
+        return;
+    }
+#ifdef PORPOISE_RUST_BRIDGE_ONLY
+    static int s_copyDispDeclines = 0;
+    if (s_copyDispDeclines < 120) {
+      OSReport("[GXCopyDisp] Rust bridge declined: %s\n", porpoise::gfx::bridge::last_status());
+      ++s_copyDispDeclines;
+    }
+    return;
+#endif
+
     // If clear is requested, clear the OpenGL framebuffer with the clear color
     // This matches GameCube behavior where GXCopyDisp clears the EFB before copying
     if (clear) {
@@ -167,6 +182,18 @@ void GXCopyDisp(void* dest, GXBool clear) {
 
 void GXCopyTex(void* dest, GXBool clear) {
   const auto& rect = g_gxState.texCopySrc;
+  porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Copy);
+  if (porpoise::gfx::bridge::copy_tex(dest, rect, g_gxState.texCopyFmt, clear, g_gxState)) {
+    return;
+  }
+#ifdef PORPOISE_RUST_BRIDGE_ONLY
+  static int s_copyTexDeclines = 0;
+  if (s_copyTexDeclines < 120) {
+    OSReport("[GXCopyTex] Rust bridge declined: %s\n", porpoise::gfx::bridge::last_status());
+    ++s_copyTexDeclines;
+  }
+  return;
+#endif
   porpoise::gfx::TextureHandle* handle = nullptr;
   const auto it = g_gxState.copyTextures.find(dest);
   if (it == g_gxState.copyTextures.end() || 

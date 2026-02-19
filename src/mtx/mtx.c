@@ -159,54 +159,49 @@ void MTXFrustum(Mtx44 m, f32 t, f32 b, f32 l, f32 r, f32 n, f32 f) {
     Returns:        none
  *---------------------------------------------------------------------------*/
 void MTXLookAt(Mtx m, const Point3d* camPos, const Vec* camUp, const Point3d* target) {
-    Vec forward, right, up;
+    Vec f, r, u;
     f32 len;
-    
-    // Calculate forward vector (from camera to target)
-    forward.x = target->x - camPos->x;
-    forward.y = target->y - camPos->y;
-    forward.z = target->z - camPos->z;
-    
-    // Normalize forward
-    len = sqrtf(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+
+    /* f = camPos - target: points FROM target TOWARD camera.
+       In GX right-handed view space, this is the +Z axis (camera looks down -Z).
+       Objects in front of the camera will have negative view-space Z. */
+    f.x = camPos->x - target->x;
+    f.y = camPos->y - target->y;
+    f.z = camPos->z - target->z;
+
+    len = sqrtf(f.x * f.x + f.y * f.y + f.z * f.z);
     if (len > 0.0f) {
-        forward.x /= len;
-        forward.y /= len;
-        forward.z /= len;
+        f.x /= len;
+        f.y /= len;
+        f.z /= len;
     }
-    
-    // Calculate right vector (forward cross up)
-    right.x = forward.y * camUp->z - forward.z * camUp->y;
-    right.y = forward.z * camUp->x - forward.x * camUp->z;
-    right.z = forward.x * camUp->y - forward.y * camUp->x;
-    
-    // Normalize right
-    len = sqrtf(right.x * right.x + right.y * right.y + right.z * right.z);
+
+    /* r = camUp x f  (right-hand rule: right = up cross backward) */
+    r.x = camUp->y * f.z - camUp->z * f.y;
+    r.y = camUp->z * f.x - camUp->x * f.z;
+    r.z = camUp->x * f.y - camUp->y * f.x;
+
+    len = sqrtf(r.x * r.x + r.y * r.y + r.z * r.z);
     if (len > 0.0f) {
-        right.x /= len;
-        right.y /= len;
-        right.z /= len;
+        r.x /= len;
+        r.y /= len;
+        r.z /= len;
     }
-    
-    // Calculate up vector (right cross forward)
-    up.x = right.y * forward.z - right.z * forward.y;
-    up.y = right.z * forward.x - right.x * forward.z;
-    up.z = right.x * forward.y - right.y * forward.x;
-    
-    // Build matrix (inverse of camera transform)
-    m[0][0] = right.x;
-    m[0][1] = up.x;
-    m[0][2] = -forward.x;
-    m[0][3] = -(right.x * camPos->x + up.x * camPos->y - forward.x * camPos->z);
-    
-    m[1][0] = right.y;
-    m[1][1] = up.y;
-    m[1][2] = -forward.y;
-    m[1][3] = -(right.y * camPos->x + up.y * camPos->y - forward.y * camPos->z);
-    
-    m[2][0] = right.z;
-    m[2][1] = up.z;
-    m[2][2] = -forward.z;
-    m[2][3] = -(right.z * camPos->x + up.z * camPos->y - forward.z * camPos->z);
+
+    /* u = f x r  (re-orthogonalised up) */
+    u.x = f.y * r.z - f.z * r.y;
+    u.y = f.z * r.x - f.x * r.z;
+    u.z = f.x * r.y - f.y * r.x;
+
+    /* Store each basis vector in a ROW (standard column-vector M*v convention).
+       Translation = -dot(basis, camPos) to move world into view space. */
+    m[0][0] = r.x;  m[0][1] = r.y;  m[0][2] = r.z;
+    m[0][3] = -(r.x * camPos->x + r.y * camPos->y + r.z * camPos->z);
+
+    m[1][0] = u.x;  m[1][1] = u.y;  m[1][2] = u.z;
+    m[1][3] = -(u.x * camPos->x + u.y * camPos->y + u.z * camPos->z);
+
+    m[2][0] = f.x;  m[2][1] = f.y;  m[2][2] = f.z;
+    m[2][3] = -(f.x * camPos->x + f.y * camPos->y + f.z * camPos->z);
 }
 

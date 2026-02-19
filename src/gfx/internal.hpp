@@ -161,7 +161,7 @@ extern Log g_log;
 } // namespace porpoise
 
 // Compatibility aliases
-namespace aurora {
+namespace porpoise {
 using Module = porpoise::Log;
 using Range = porpoise::Range;
 using ByteBuffer = porpoise::ByteBuffer;
@@ -197,7 +197,7 @@ using ByteBuffer = porpoise::ByteBuffer;
     UNLIKELY { porpoise::g_log.warn(msg, ##__VA_ARGS__); }
 
 // ArrayRef compatibility
-namespace aurora {
+namespace porpoise {
 template <typename T>
 class ArrayRef {
 public:

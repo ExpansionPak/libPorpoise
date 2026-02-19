@@ -43,39 +43,10 @@ struct TextureBind {
 
 // Stub texture functions - to be implemented with actual graphics backend
 TextureHandle* new_static_texture_2d(u32 width, u32 height, u32 mips, u32 format,
-                                     aurora::ArrayRef<uint8_t> data, bool tlut, const char* label);
+    porpoise::ArrayRef<uint8_t> data, bool tlut, const char* label);
 TextureHandle* new_dynamic_texture_2d(u16 width, u16 height, u32 mipLevels, u32 format, const char* name);
 TextureHandle* new_render_texture(u16 width, u16 height, u32 format, const char* name);
 void write_texture(TextureHandle& handle, std::string_view data);
-void resolve_pass(TextureHandle& handle, const ClipRect& rect, bool clear, const aurora::Vec4<float>& clearColor);
+void resolve_pass(TextureHandle& handle, const ClipRect& rect, bool clear, const porpoise::Vec4<float>& clearColor);
 
 } // namespace porpoise::gfx
-
-// Compatibility aliases for Aurora code
-namespace aurora::gfx {
-using TextureHandle = porpoise::gfx::TextureHandle;
-using TextureBind = porpoise::gfx::TextureBind;
-using ClipRect = porpoise::gfx::ClipRect;
-
-inline TextureHandle* new_static_texture_2d(u32 width, u32 height, u32 mips, u32 format,
-                                            aurora::ArrayRef<uint8_t> data, bool tlut, const char* label) {
-  return porpoise::gfx::new_static_texture_2d(width, height, mips, format, data, tlut, label);
-}
-
-inline TextureHandle* new_dynamic_texture_2d(u16 width, u16 height, u32 mipLevels, u32 format, const char* name) {
-  return porpoise::gfx::new_dynamic_texture_2d(width, height, mipLevels, format, name);
-}
-
-inline void write_texture(TextureHandle& handle, std::string_view data) {
-  porpoise::gfx::write_texture(handle, data);
-}
-
-inline TextureHandle* new_render_texture(u16 width, u16 height, u32 format, const char* name) {
-  return porpoise::gfx::new_render_texture(width, height, format, name);
-}
-
-inline void resolve_pass(TextureHandle& handle, const ClipRect& rect, bool clear, const aurora::Vec4<float>& clearColor) {
-  porpoise::gfx::resolve_pass(handle, rect, clear, clearColor);
-}
-}
-

@@ -7,7 +7,7 @@ namespace porpoise::gfx {
 
 // Stub implementations - to be replaced with actual graphics backend
 TextureHandle* new_static_texture_2d(u32 width, u32 height, u32 mips, u32 format,
-                                     aurora::ArrayRef<uint8_t> data, bool tlut, const char* label) {
+                                     porpoise::ArrayRef<uint8_t> data, bool tlut, const char* label) {
   // Size is calculated from the ArrayRef parameter (data.size)
   // This function receives the size via ArrayRef, so we don't need a separate size parameter
   auto* handle = new TextureHandle();
@@ -54,7 +54,7 @@ void write_texture(TextureHandle& handle, std::string_view data) {
   (void)data;
 }
 
-void resolve_pass(TextureHandle& handle, const ClipRect& rect, bool clear, const aurora::Vec4<float>& clearColor) {
+void resolve_pass(TextureHandle& handle, const ClipRect& rect, bool clear, const porpoise::Vec4<float>& clearColor) {
   // TODO: Implement with actual graphics backend
   // For now, just a stub
   (void)handle;

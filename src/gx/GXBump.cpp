@@ -17,7 +17,7 @@ void GXSetIndTexCoordScale(GXIndTexStageID indStage, GXIndTexScale scaleS, GXInd
 
 void GXSetIndTexMtx(GXIndTexMtxID id, const void* offset, s8 scaleExp) {
   CHECK(id >= GX_ITM_0 && id <= GX_ITM_2, "invalid ind tex mtx ID {}", static_cast<int>(id));
-  update_gx_state(g_gxState.indTexMtxs[id - 1], {*reinterpret_cast<const aurora::Mat3x2<float>*>(offset), scaleExp});
+  update_gx_state(g_gxState.indTexMtxs[id - 1], {*reinterpret_cast<const porpoise::Mat3x2<float>*>(offset), scaleExp});
 }
 
 void GXSetTevIndirect(GXTevStageID tevStage, GXIndTexStageID indStage, GXIndTexFormat fmt, GXIndTexBiasSel biasSel,

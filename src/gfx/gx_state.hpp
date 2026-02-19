@@ -24,7 +24,7 @@ using ::porpoise::gfx::TextureHandle;
 inline constexpr float GX_LARGE_NUMBER = -1048576.0f;
 inline constexpr float M_PIF = 3.14159265358979323846f;
 
-using TexMtxVariant = std::variant<std::monostate, aurora::Mat2x4<float>, aurora::Mat3x4<float>>;
+using TexMtxVariant = std::variant<std::monostate, porpoise::Mat2x4<float>, porpoise::Mat3x4<float>>;
 
 struct GXTexObj_ {
   const void* data = nullptr;
@@ -130,7 +130,7 @@ struct IndStage {
 };
 
 struct IndTexMtxInfo {
-  aurora::Mat3x2<float> mtx{};
+  porpoise::Mat3x2<float> mtx{};
   s8 scaleExp = 0;
 };
 
@@ -145,16 +145,16 @@ struct VtxFmt {
 };
 
 struct PnMtx {
-  aurora::Mat3x4<float> pos;
-  aurora::Mat3x4<float> nrm;
+  porpoise::Mat3x4<float> pos;
+  porpoise::Mat3x4<float> nrm;
 };
 
 struct Light {
-  aurora::Vec4<float> pos{0.f, 0.f, 0.f, 1.f};
-  aurora::Vec4<float> dir{0.f, 0.f, 0.f, 0.f};
-  aurora::Vec4<float> color{0.f, 0.f, 0.f, 0.f};
-  aurora::Vec4<float> cosAtt{0.f, 0.f, 0.f, 0.f};
-  aurora::Vec4<float> distAtt{0.f, 0.f, 0.f, 0.f};
+  porpoise::Vec4<float> pos{0.f, 0.f, 0.f, 1.f};
+  porpoise::Vec4<float> dir{0.f, 0.f, 0.f, 0.f};
+  porpoise::Vec4<float> color{0.f, 0.f, 0.f, 0.f};
+  porpoise::Vec4<float> cosAtt{0.f, 0.f, 0.f, 0.f};
+  porpoise::Vec4<float> distAtt{0.f, 0.f, 0.f, 0.f};
 };
 
 struct ColorChannelConfig {
@@ -166,8 +166,8 @@ struct ColorChannelConfig {
 };
 
 struct ColorChannelState {
-  aurora::Vec4<float> matColor{0.f, 0.f, 0.f, 1.f};
-  aurora::Vec4<float> ambColor{0.f, 0.f, 0.f, 1.f};
+  porpoise::Vec4<float> matColor{0.f, 0.f, 0.f, 1.f};
+  porpoise::Vec4<float> ambColor{0.f, 0.f, 0.f, 1.f};
   GX::LightMask lightMask{};
 };
 
@@ -177,7 +177,7 @@ struct FogState {
   float endZ = 0.f;
   float nearZ = 0.f;
   float farZ = 0.f;
-  aurora::Vec4<float> color{0.f, 0.f, 0.f, 1.f};
+  porpoise::Vec4<float> color{0.f, 0.f, 0.f, 1.f};
   bool rangeAdjustEnabled = false;
   u16 rangeAdjustCenter = 0;
   std::array<u16, 10> rangeAdjustTable{};
@@ -209,7 +209,7 @@ struct TevStage {
 struct GXState {
   std::array<PnMtx, 10> pnMtx{};
   u32 currentPnMtx = 0;
-  aurora::Mat4x4<float> proj{};
+  porpoise::Mat4x4<float> proj{};
   GXProjectionType projType = GX_PERSPECTIVE;
   FogState fog{};
   GXCullMode cullMode = GX_CULL_BACK;
@@ -218,11 +218,11 @@ struct GXState {
   GXBlendFactor blendFacDst = GX_BL_INVSRCALPHA;
   GXLogicOp blendOp = GX_LO_CLEAR;
   GXCompare depthFunc = GX_LEQUAL;
-  aurora::Vec4<float> clearColor{0.f, 0.f, 0.f, 1.f};
+  porpoise::Vec4<float> clearColor{0.f, 0.f, 0.f, 1.f};
   u32 dstAlpha = UINT32_MAX;
   AlphaCompare alphaCompare{};
-  std::array<aurora::Vec4<float>, 4> colorRegs{};
-  std::array<aurora::Vec4<float>, GX_MAX_KCOLOR> kcolors{};
+  std::array<porpoise::Vec4<float>, 4> colorRegs{};
+  std::array<porpoise::Vec4<float>, GX_MAX_KCOLOR> kcolors{};
   std::array<ColorChannelConfig, 4> colorChannelConfig{};
   std::array<ColorChannelState, 4> colorChannelState{};
   std::array<Light, GX::MaxLights> lights{};
@@ -230,7 +230,7 @@ struct GXState {
   std::array<TextureBind, GX_MAX_TEXMAP> textures{};
   std::array<GXTlutObj_, 20> tluts{};
   std::array<TexMtxVariant, 10> texMtxs{};
-  std::array<aurora::Mat3x4<float>, 20> ptTexMtxs{};
+  std::array<porpoise::Mat3x4<float>, 20> ptTexMtxs{};
   std::array<TcgConfig, GX_MAX_TEXCOORD> tcgs{};
   std::array<GXAttrType, GX_VA_MAX_ATTR> vtxDesc{};
   std::array<VtxFmt, GX_MAX_VTXFMT> vtxFmts{};
@@ -241,7 +241,7 @@ struct GXState {
   ClipRect texCopySrc{};
   GXTexFmt texCopyFmt = GX_TF_I4;
   std::unordered_map<const void*, TextureHandle*> copyTextures;
-  std::optional<aurora::ByteBuffer> dynamicDlBuf;
+  std::optional<porpoise::ByteBuffer> dynamicDlBuf;
   bool depthCompare = true;
   bool depthUpdate = true;
   bool colorUpdate = true;
@@ -257,7 +257,7 @@ extern GXState g_gxState;
 
 } // namespace porpoise::gfx::gx
 
-namespace aurora::gfx::gx {
+namespace porpoise::gfx::gx {
 using porpoise::gfx::gx::GXState;
 using porpoise::gfx::gx::g_gxState;
 using porpoise::gfx::gx::GXTexObj_;

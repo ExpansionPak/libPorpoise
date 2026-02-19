@@ -8,7 +8,7 @@
 #include <cstring>
 #include <array>
 
-namespace aurora {
+namespace porpoise {
 
 // Vector types
 template <typename T>

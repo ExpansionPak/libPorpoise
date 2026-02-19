@@ -8,6 +8,12 @@ inline constexpr float GX_LARGE_NUMBER = -1048576.0f;
 inline constexpr float M_PIF = 3.14159265358979323846f;
 #endif
 
+namespace {
+inline void notify_lighting_state() {
+  porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Lighting);
+}
+} // namespace
+
 extern "C" {
 void GXInitLightAttn(GXLightObj* light_, float a0, float a1, float a2, float k0, float k1, float k2) {
   auto* light = reinterpret_cast<GXLightObj_*>(light_);
@@ -17,6 +23,7 @@ void GXInitLightAttn(GXLightObj* light_, float a0, float a1, float a2, float k0,
   light->k0 = k0;
   light->k1 = k1;
   light->k2 = k2;
+  notify_lighting_state();
 }
 
 void GXInitLightAttnA(GXLightObj* light_, float a0, float a1, float a2) {
@@ -24,6 +31,7 @@ void GXInitLightAttnA(GXLightObj* light_, float a0, float a1, float a2) {
   light->a0 = a0;
   light->a1 = a1;
   light->a2 = a2;
+  notify_lighting_state();
 }
 
 void GXInitLightAttnK(GXLightObj* light_, float k0, float k1, float k2) {
@@ -31,6 +39,7 @@ void GXInitLightAttnK(GXLightObj* light_, float k0, float k1, float k2) {
   light->k0 = k0;
   light->k1 = k1;
   light->k2 = k2;
+  notify_lighting_state();
 }
 
 void GXInitLightSpot(GXLightObj* light_, float cutoff, GXSpotFn spotFn) {
@@ -87,6 +96,7 @@ void GXInitLightSpot(GXLightObj* light_, float cutoff, GXSpotFn spotFn) {
   light->a0 = a0;
   light->a1 = a1;
   light->a2 = a2;
+  notify_lighting_state();
 }
 
 void GXInitLightDistAttn(GXLightObj* light_, float refDistance, float refBrightness, GXDistAttnFn distFunc) {
@@ -123,6 +133,7 @@ void GXInitLightDistAttn(GXLightObj* light_, float refDistance, float refBrightn
   light->k0 = k0;
   light->k1 = k1;
   light->k2 = k2;
+  notify_lighting_state();
 }
 
 void GXInitLightPos(GXLightObj* light_, float x, float y, float z) {
@@ -130,16 +141,18 @@ void GXInitLightPos(GXLightObj* light_, float x, float y, float z) {
   light->px = x;
   light->py = y;
   light->pz = z;
+  notify_lighting_state();
 }
 
 void GXInitLightColor(GXLightObj* light_, GXColor col) {
   auto* light = reinterpret_cast<GXLightObj_*>(light_);
   light->color = col;
+  notify_lighting_state();
 }
 
 void GXLoadLightObjImm(GXLightObj* light_, GXLightID id) {
   u32 idx = std::log2<u32>(id);
-  aurora::gfx::gx::Light realLight;
+  porpoise::gfx::gx::Light realLight;
   auto* light = reinterpret_cast<const GXLightObj_*>(light_);
   realLight.pos = {light->px, light->py, light->pz};
   realLight.dir = {light->nx, light->ny, light->nz};
@@ -147,6 +160,7 @@ void GXLoadLightObjImm(GXLightObj* light_, GXLightID id) {
   realLight.cosAtt = {light->a0, light->a1, light->a2};
   realLight.distAtt = {light->k0, light->k1, light->k2};
   update_gx_state(g_gxState.lights[idx], realLight);
+  notify_lighting_state();
 }
 
 // TODO GXLoadLightObjIndx
@@ -163,6 +177,7 @@ void GXSetChanAmbColor(GXChannelID id, GXColor color) {
   }
   CHECK(id >= GX_COLOR0 && id <= GX_ALPHA1, "bad channel {}", static_cast<int>(id));
   update_gx_state(g_gxState.colorChannelState[id].ambColor, from_gx_color(color));
+  notify_lighting_state();
 }
 
 void GXSetChanMatColor(GXChannelID id, GXColor color) {
@@ -177,15 +192,20 @@ void GXSetChanMatColor(GXChannelID id, GXColor color) {
   }
   CHECK(id >= GX_COLOR0 && id <= GX_ALPHA1, "bad channel {}", static_cast<int>(id));
   update_gx_state(g_gxState.colorChannelState[id].matColor, from_gx_color(color));
+  notify_lighting_state();
 }
 
-void GXSetNumChans(u8 num) { update_gx_state(g_gxState.numChans, num); }
+void GXSetNumChans(u8 num) {
+  update_gx_state(g_gxState.numChans, num);
+  notify_lighting_state();
+}
 
 void GXInitLightDir(GXLightObj* light_, float nx, float ny, float nz) {
   auto* light = reinterpret_cast<GXLightObj_*>(light_);
   light->nx = -nx;
   light->ny = -ny;
   light->nz = -nz;
+  notify_lighting_state();
 }
 
 void GXInitSpecularDir(GXLightObj* light_, float nx, float ny, float nz) {
@@ -204,6 +224,7 @@ void GXInitSpecularDir(GXLightObj* light_, float nx, float ny, float nz) {
   light->nx = hx * mag;
   light->ny = hy * mag;
   light->nz = hz * mag;
+  notify_lighting_state();
 }
 
 void GXInitSpecularDirHA(GXLightObj* light_, float nx, float ny, float nz, float hx, float hy, float hz) {
@@ -214,6 +235,7 @@ void GXInitSpecularDirHA(GXLightObj* light_, float nx, float ny, float nz, float
   light->nx = hx;
   light->ny = hy;
   light->nz = hz;
+  notify_lighting_state();
 }
 
 void GXSetChanCtrl(GXChannelID id, bool lightingEnabled, GXColorSrc ambSrc, GXColorSrc matSrc, u32 lightState,
@@ -235,5 +257,6 @@ void GXSetChanCtrl(GXChannelID id, bool lightingEnabled, GXColorSrc ambSrc, GXCo
   update_gx_state(chan.diffFn, diffFn);
   update_gx_state(chan.attnFn, attnFn);
   update_gx_state(g_gxState.colorChannelState[id].lightMask, GX::LightMask{lightState});
+  notify_lighting_state();
 }
 }

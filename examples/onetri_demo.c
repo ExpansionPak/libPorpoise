@@ -149,10 +149,10 @@
      // Color 0 has 4 components (r, g, b, a), each component is 8b.
      GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
      
-     // stride = 3 elements (x,y,z) each of type s16
-     GXSetArray(GX_VA_POS, Verts_s16, 3*sizeof(s16));
-     // stride = 4 elements (r,g,b,a) each of type u8
-     GXSetArray(GX_VA_CLR0, Colors_rgba8, 4*sizeof(u8));
+    // stride = 3 elements (x,y,z) each of type s16
+    GXSetArray(GX_VA_POS, Verts_s16, 3*sizeof(s16));
+    // stride = 4 elements (r,g,b,a) each of type u8
+    GXSetArray(GX_VA_CLR0, Colors_rgba8, 4*sizeof(u8));
  
      // Initialize lighting, texgen, and tev parameters
      GXSetNumChans(1); // default, color = vertex color

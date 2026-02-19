@@ -1,0 +1,19 @@
+[package]
+name = "porpoise_rust_renderer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bytemuck = { version = "1.21", features = ["derive"] }
+image = "0.25"
+pollster = "0.4"
+raw-window-handle = "0.6"
+wgpu = { version = "26.0", default-features = false, features = ["dx12", "vulkan", "wgsl"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = "thin"

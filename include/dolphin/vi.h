@@ -272,6 +272,14 @@ SDL_GLContext VIGetGLContext(void);
 void VIGetWindowSize(int* width, int* height);
 
 /**
+ * @brief Make OpenGL context current (PC-specific)
+ * 
+ * Ensures the OpenGL context is current for the calling thread.
+ * Should be called before rendering.
+ */
+void VIMakeContextCurrent(void);
+
+/**
  * @brief Swap OpenGL buffers (PC-specific)
  * 
  * Swaps the back buffer to front to display the rendered frame.

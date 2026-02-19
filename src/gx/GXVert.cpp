@@ -1,15 +1,18 @@
 #include "gx.hpp"
 
 #include "../gfx/math.hpp"
+#include "../gfx/render.hpp"
+#include <dolphin/os.h>  // For OSReport
 
 #include <cstring>
 #include <optional>
+#include <limits>
 
 struct Attribute {
   uint32_t offset;
   GXAttr attr;
   GXAttrType type;
-  aurora::gfx::gx::VtxAttrFmt fmt;
+  porpoise::gfx::gx::VtxAttrFmt fmt;
 };
 
 struct SStreamState {
@@ -20,7 +23,7 @@ struct SStreamState {
   u16 vertexCount = 0;
   u16 vertexStart;
   u16 vertexSize;
-  aurora::ByteBuffer vertexBuffer;
+  porpoise::ByteBuffer vertexBuffer;
   uint8_t* vertexData = nullptr;
   std::vector<u16> indices;
 
@@ -184,10 +187,10 @@ void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
 
 void GXPosition3f32(f32 x, f32 y, f32 z) {
   if (auto& dlBuf = g_gxState.dynamicDlBuf) {
-    dlBuf->append(aurora::Vec3{x, y, z});
+    dlBuf->append(porpoise::Vec3{x, y, z});
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_POS, GX_POS_XYZ, GX_F32);
-    stream->append(aurora::Vec3{x, y, z});
+    stream->append(porpoise::Vec3{x, y, z});
   } else {
     FATAL("Stream function called with no stream or DL active");
   }
@@ -200,7 +203,7 @@ void GXPosition3u16(u16 x, u16 y, u16 z) {
     dlBuf->append(z);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XYZ, GX_U16);
-    stream->append(aurora::Vec3{
+    stream->append(porpoise::Vec3{
         static_cast<f32>(x) / static_cast<f32>(1 << frac),
         static_cast<f32>(y) / static_cast<f32>(1 << frac),
         static_cast<f32>(z) / static_cast<f32>(1 << frac),
@@ -217,7 +220,7 @@ void GXPosition3s16(s16 x, s16 y, s16 z) {
     dlBuf->append(z);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XYZ, GX_S16);
-    stream->append(aurora::Vec3{
+    stream->append(porpoise::Vec3{
         static_cast<f32>(x) / static_cast<f32>(1 << frac),
         static_cast<f32>(y) / static_cast<f32>(1 << frac),
         static_cast<f32>(z) / static_cast<f32>(1 << frac),
@@ -234,7 +237,7 @@ void GXPosition3u8(u8 x, u8 y, u8 z) {
     dlBuf->append(z);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XYZ, GX_U8);
-    stream->append(aurora::Vec3{
+    stream->append(porpoise::Vec3{
         static_cast<f32>(x) / static_cast<f32>(1 << frac),
         static_cast<f32>(y) / static_cast<f32>(1 << frac),
         static_cast<f32>(z) / static_cast<f32>(1 << frac),
@@ -251,7 +254,7 @@ void GXPosition3s8(s8 x, s8 y, s8 z) {
     dlBuf->append(z);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XYZ, GX_S8);
-    stream->append(aurora::Vec3{
+    stream->append(porpoise::Vec3{
         static_cast<f32>(x) / static_cast<f32>(1 << frac),
         static_cast<f32>(y) / static_cast<f32>(1 << frac),
         static_cast<f32>(z) / static_cast<f32>(1 << frac),
@@ -263,10 +266,10 @@ void GXPosition3s8(s8 x, s8 y, s8 z) {
 
 void GXPosition2f32(f32 x, f32 y) {
   if (auto& dlBuf = g_gxState.dynamicDlBuf) {
-    dlBuf->append(aurora::Vec2{x, y});
+    dlBuf->append(porpoise::Vec2{x, y});
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_POS, GX_POS_XY, GX_F32);
-    stream->append(aurora::Vec3{x, y, 0.f});
+    stream->append(porpoise::Vec3{x, y, 0.f});
   } else {
     FATAL("Stream function called with no stream or DL active");
   }
@@ -278,7 +281,7 @@ void GXPosition2u16(u16 x, u16 y) {
     dlBuf->append(y);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XY, GX_U16);
-    stream->append(aurora::Vec3{
+    stream->append(porpoise::Vec3{
         static_cast<f32>(x) / static_cast<f32>(1 << frac),
         static_cast<f32>(y) / static_cast<f32>(1 << frac),
         0.f,
@@ -294,7 +297,7 @@ void GXPosition2s16(s16 x, s16 y) {
     dlBuf->append(y);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XY, GX_S16);
-    stream->append(aurora::Vec3{
+    stream->append(porpoise::Vec3{
         static_cast<f32>(x) / static_cast<f32>(1 << frac),
         static_cast<f32>(y) / static_cast<f32>(1 << frac),
         0.f,
@@ -310,7 +313,7 @@ void GXPosition2u8(u8 x, u8 y) {
     dlBuf->append(y);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XY, GX_U8);
-    stream->append(aurora::Vec3{
+    stream->append(porpoise::Vec3{
         static_cast<f32>(x) / static_cast<f32>(1 << frac),
         static_cast<f32>(y) / static_cast<f32>(1 << frac),
         0.f,
@@ -326,7 +329,7 @@ void GXPosition2s8(s8 x, s8 y) {
     dlBuf->append(y);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_POS, GX_POS_XY, GX_S8);
-    stream->append(aurora::Vec3{
+    stream->append(porpoise::Vec3{
         static_cast<f32>(x) / static_cast<f32>(1 << frac),
         static_cast<f32>(y) / static_cast<f32>(1 << frac),
         0.f,
@@ -360,10 +363,10 @@ void GXPosition1x8(u8 idx) {
 
 void GXNormal3f32(f32 x, f32 y, f32 z) {
   if (auto& dlBuf = g_gxState.dynamicDlBuf) {
-    dlBuf->append(aurora::Vec3{x, y, z});
+    dlBuf->append(porpoise::Vec3{x, y, z});
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_NRM, GX_NRM_XYZ, GX_F32);
-    stream->append(aurora::Vec3{x, y, z});
+    stream->append(porpoise::Vec3{x, y, z});
   } else {
     FATAL("Stream function called with no stream or DL active");
   }
@@ -376,7 +379,7 @@ void GXNormal3s16(s16 x, s16 y, s16 z) {
     dlBuf->append(z);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_NRM, GX_NRM_XYZ, GX_S16);
-    stream->append(aurora::Vec3{
+    stream->append(porpoise::Vec3{
         static_cast<f32>(x) / static_cast<f32>(1 << frac),
         static_cast<f32>(y) / static_cast<f32>(1 << frac),
         static_cast<f32>(z) / static_cast<f32>(1 << frac),
@@ -393,7 +396,7 @@ void GXNormal3s8(s8 x, s8 y, s8 z) {
     dlBuf->append(z);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_NRM, GX_NRM_XYZ, GX_S8);
-    stream->append(aurora::Vec3{
+    stream->append(porpoise::Vec3{
         static_cast<f32>(x) / static_cast<f32>(1 << frac),
         static_cast<f32>(y) / static_cast<f32>(1 << frac),
         static_cast<f32>(z) / static_cast<f32>(1 << frac),
@@ -427,10 +430,10 @@ void GXNormal1x8(u8 index) {
 
 void GXColor4f32(f32 r, f32 g, f32 b, f32 a) {
   if (auto& dlBuf = g_gxState.dynamicDlBuf) {
-    dlBuf->append(aurora::Vec4{r, g, b, a});
+    dlBuf->append(porpoise::Vec4{r, g, b, a});
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8);
-    stream->append(aurora::Vec4{r, g, b, a});
+    stream->append(porpoise::Vec4{r, g, b, a});
   } else {
     FATAL("Stream function called with no stream or DL active");
   }
@@ -444,7 +447,7 @@ void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
     dlBuf->append(a);
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8);
-    stream->append(aurora::Vec4{
+    stream->append(porpoise::Vec4{
         static_cast<f32>(r) / 255.f,
         static_cast<f32>(g) / 255.f,
         static_cast<f32>(b) / 255.f,
@@ -462,7 +465,7 @@ void GXColor3u8(u8 r, u8 g, u8 b) {
     dlBuf->append(b);
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_CLR0, GX_CLR_RGB, GX_RGB8);
-    stream->append(aurora::Vec4{
+    stream->append(porpoise::Vec4{
         static_cast<f32>(r) / 255.f,
         static_cast<f32>(g) / 255.f,
         static_cast<f32>(b) / 255.f,
@@ -478,7 +481,7 @@ void GXColor1u32(u32 clr) {
     dlBuf->append(clr);
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8);
-    stream->append(aurora::Vec4{
+    stream->append(porpoise::Vec4{
         static_cast<f32>((clr >> 24) & 0xff) / 255.f,
         static_cast<f32>((clr >> 16) & 0xff) / 255.f,
         static_cast<f32>((clr >> 8) & 0xff) / 255.f,
@@ -494,7 +497,7 @@ void GXColor1u16(u16 clr) {
     dlBuf->append(clr);
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_CLR0, GX_CLR_RGB, GX_RGB565);
-    stream->append(aurora::Vec4{
+    stream->append(porpoise::Vec4{
         static_cast<f32>((clr >> 11) & 0x1f) / 31.f,
         static_cast<f32>((clr >> 5) & 0x3f) / 63.f,
         static_cast<f32>(clr & 0x1f) / 31.f,
@@ -529,10 +532,10 @@ void GXColor1x8(u8 index) {
 
 void GXTexCoord2f32(f32 s, f32 t) {
   if (auto& dlBuf = g_gxState.dynamicDlBuf) {
-    dlBuf->append(aurora::Vec2{s, t});
+    dlBuf->append(porpoise::Vec2{s, t});
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_TEX0, GX_TEX_ST, GX_F32);
-    stream->append(aurora::Vec2{s, t});
+    stream->append(porpoise::Vec2{s, t});
   } else {
     FATAL("Stream function called with no stream or DL active");
   }
@@ -544,7 +547,7 @@ void GXTexCoord2u16(u16 s, u16 t) {
     dlBuf->append(t);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_ST, GX_U16);
-    stream->append(aurora::Vec2{
+    stream->append(porpoise::Vec2{
         static_cast<f32>(s) / static_cast<f32>(1 << frac),
         static_cast<f32>(t) / static_cast<f32>(1 << frac),
     });
@@ -559,7 +562,7 @@ void GXTexCoord2s16(s16 s, s16 t) {
     dlBuf->append(t);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_ST, GX_S16);
-    stream->append(aurora::Vec2{
+    stream->append(porpoise::Vec2{
         static_cast<f32>(s) / static_cast<f32>(1 << frac),
         static_cast<f32>(t) / static_cast<f32>(1 << frac),
     });
@@ -574,7 +577,7 @@ void GXTexCoord2u8(u8 s, u8 t) {
     dlBuf->append(t);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_ST, GX_U8);
-    stream->append(aurora::Vec2{
+    stream->append(porpoise::Vec2{
         static_cast<f32>(s) / static_cast<f32>(1 << frac),
         static_cast<f32>(t) / static_cast<f32>(1 << frac),
     });
@@ -589,7 +592,7 @@ void GXTexCoord2s8(s8 s, s8 t) {
     dlBuf->append(t);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_ST, GX_S8);
-    stream->append(aurora::Vec2{
+    stream->append(porpoise::Vec2{
         static_cast<f32>(s) / static_cast<f32>(1 << frac),
         static_cast<f32>(t) / static_cast<f32>(1 << frac),
     });
@@ -603,7 +606,7 @@ void GXTexCoord1f32(f32 s) {
     dlBuf->append(s);
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_F32);
-    stream->append(aurora::Vec2{s, 0.f});
+    stream->append(porpoise::Vec2{s, 0.f});
   } else {
     FATAL("Stream function called with no stream or DL active");
   }
@@ -614,7 +617,7 @@ void GXTexCoord1u16(u16 s) {
     dlBuf->append(s);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_U16);
-    stream->append(aurora::Vec2{
+    stream->append(porpoise::Vec2{
         static_cast<f32>(s) / static_cast<f32>(1 << frac),
         0.f,
     });
@@ -628,7 +631,7 @@ void GXTexCoord1s16(s16 s) {
     dlBuf->append(s);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_S16);
-    stream->append(aurora::Vec2{
+    stream->append(porpoise::Vec2{
         static_cast<f32>(s) / static_cast<f32>(1 << frac),
         0.f,
     });
@@ -642,7 +645,7 @@ void GXTexCoord1u8(u8 s) {
     dlBuf->append(s);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_U8);
-    stream->append(aurora::Vec2{
+    stream->append(porpoise::Vec2{
         static_cast<f32>(s) / static_cast<f32>(1 << frac),
         0.f,
     });
@@ -656,7 +659,7 @@ void GXTexCoord1s8(s8 s) {
     dlBuf->append(s);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_S8);
-    stream->append(aurora::Vec2{
+    stream->append(porpoise::Vec2{
         static_cast<f32>(s) / static_cast<f32>(1 << frac),
         0.f,
     });
@@ -696,6 +699,165 @@ void GXEnd() {
   if (!sStreamState) {
     return;
   }
+
+  // If no vertices were collected, just reset and return
+  if (sStreamState->vertexCount == 0) {
+    sStreamState.reset();
+    return;
+  }
+
+  // Push vertex and index data to staging buffers (like Aurora)
+  // Store references to the data before copying to ensure they remain valid
+  const auto& vertexBuf = sStreamState->vertexBuffer;
+  const auto& indexBuf = sStreamState->indices;
+  const size_t vertSize = vertexBuf.size();
+  const size_t idxSize = indexBuf.size() * sizeof(u16);
+  
+  // Only copy if we have valid data
+  porpoise::Range vertRange{0, 0};
+  porpoise::Range indexRange{0, 0};
+  
+  if (vertSize > 0 && vertexBuf.data() != nullptr) {
+    vertRange = porpoise::gfx::push_verts(vertexBuf.data(), vertSize);
+  }
+  
+  if (idxSize > 0 && !indexBuf.empty()) {
+    indexRange = porpoise::gfx::push_indices(
+        reinterpret_cast<const uint8_t*>(indexBuf.data()), idxSize);
+  }
+
+  // Handle indexed attribute arrays (GX_INDEX8/GX_INDEX16)
+  // These are stored separately and referenced by the draw command
+  porpoise::gfx::DrawData drawData{};
+  drawData.vertRange = vertRange;
+  drawData.idxRange = indexRange;
+  drawData.indexCount = static_cast<uint32_t>(sStreamState->indices.size());
+  drawData.primitive = sStreamState->primitive;
+  drawData.vtxFmt = sStreamState->vtxFmt;
+  drawData.dstAlpha = g_gxState.dstAlpha;
+  drawData.posArrayStride = g_gxState.arrays[GX_VA_POS].stride;
+  drawData.colorArrayStride = g_gxState.arrays[GX_VA_CLR0].stride;
+  for (int i = 0; i < 16; ++i) {
+    drawData.modelView[i] = 0.0f;
+  }
+  drawData.modelView[15] = 1.0f;
+  const auto& pnMtx = g_gxState.pnMtx[g_gxState.currentPnMtx];
+  for (int row = 0; row < 3; ++row) {
+    for (int col = 0; col < 4; ++col) {
+      drawData.modelView[col * 4 + row] = pnMtx.pos(row, col);
+    }
+  }
+
+  u32 indexedOffset = 0;
+  for (GXAttr attr = GX_VA_POS; attr < GX_VA_MAX_ATTR; attr = static_cast<GXAttr>(attr + 1)) {
+    const auto type = g_gxState.vtxDesc[attr];
+    if (type != GX_INDEX8 && type != GX_INDEX16) {
+      continue;
+    }
+    // Stream packing stores indexed attributes as u16 slots even for GX_INDEX8.
+    const u32 packedIndexSize = 2u;
+    if (attr == GX_VA_POS) {
+      drawData.posIndexOffset = indexedOffset;
+      drawData.posIndexSize = static_cast<u8>(packedIndexSize);
+    } else if (attr == GX_VA_CLR0) {
+      drawData.colorIndexOffset = indexedOffset;
+      drawData.colorIndexSize = static_cast<u8>(packedIndexSize);
+    }
+    indexedOffset += packedIndexSize;
+  }
+  drawData.indexedStride = indexedOffset;
+
+  // PHASE 1: Calculate array sizes by scanning vertex buffer for max indices
+  // This is a "dummy" pass that doesn't push anything, just calculates sizes
+  for (int i = 0; i < GX_VA_MAX_ATTR; ++i) {
+    if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
+      continue;
+    }
+    auto& array = g_gxState.arrays[i];
+    if (array.size == 0xFFFFFFFFu && array.data) {
+      // Calculate size silently - no logging needed
+      // Need to calculate size - scan vertex buffer for max index
+      const GXAttrType indexType = g_gxState.vtxDesc[i];
+      u32 maxIndex = 0;
+      
+      // Calculate index stride (offset to this attribute's index in packed stream layout)
+      u32 indexStride = 0;
+      for (GXAttr a = GX_VA_POS; a < i; a = static_cast<GXAttr>(a + 1)) {
+        const auto t = g_gxState.vtxDesc[a];
+        if (t == GX_INDEX8 || t == GX_INDEX16) {
+          indexStride += 2;
+        }
+      }
+      
+      // Scan vertex buffer to find maximum index for this attribute
+      const uint8_t* vertData = vertexBuf.data();
+      const size_t vertDataSize = vertexBuf.size();
+      u32 indexSize = 2;
+      u32 totalIndexStride = 0;
+      
+      // Calculate total stride for all indexed attributes
+      for (GXAttr a = GX_VA_POS; a < GX_VA_MAX_ATTR; a = static_cast<GXAttr>(a + 1)) {
+        const auto t = g_gxState.vtxDesc[a];
+        if (t == GX_INDEX8 || t == GX_INDEX16) {
+          totalIndexStride += 2;
+        }
+      }
+      
+      // Scan through vertices to find max index
+      if (totalIndexStride > 0 && vertDataSize >= totalIndexStride) {
+        u32 vertexCount = vertDataSize / totalIndexStride;
+        for (u32 v = 0; v < vertexCount; ++v) {
+          u32 offset = v * totalIndexStride + indexStride;
+          if (offset + indexSize <= vertDataSize) {
+            u32 idx = (vertData[offset] | (static_cast<u32>(vertData[offset + 1]) << 8));
+            if (indexType == GX_INDEX8) {
+              idx &= 0xFFu;
+            }
+            if (idx > maxIndex) maxIndex = idx;
+          }
+        }
+      }
+      
+      // Calculate size: (maxIndex + 1) * stride
+      size_t calculatedSize = static_cast<size_t>(maxIndex + 1) * array.stride;
+      // Cap at 50MB to stay under push_verts' 100MB limit
+      if (calculatedSize > 50 * 1024 * 1024) {
+        calculatedSize = 50 * 1024 * 1024;
+      }
+      // Store calculated size (temporarily, won't persist to next frame)
+      array.size = calculatedSize;
+    }
+  }
+  
+  // PHASE 2: Push arrays using calculated sizes
+  for (int i = 0; i < GX_VA_MAX_ATTR; ++i) {
+    if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
+      continue;
+    }
+    auto& array = g_gxState.arrays[i];
+    if (array.cachedRange.size > 0) {
+      // Use the currently cached range (like Aurora)
+      drawData.arrayRanges[i] = array.cachedRange;
+    } else if (array.data) {
+      // Use the size calculated in Phase 1 (or use existing size if already set)
+      size_t arraySize = array.size;
+      
+      if (arraySize > 0 && arraySize != 0xFFFFFFFFu) {
+        // Push array data to storage buffer and cache range (like Aurora)
+        const auto range = porpoise::gfx::push_verts(
+            static_cast<const uint8_t*>(array.data), 
+            arraySize);
+        if (range.size > 0) {
+          drawData.arrayRanges[i] = range;
+          array.cachedRange = range;
+        }
+      }
+    }
+  }
+
+  // Queue the draw command for deferred rendering
+  porpoise::gfx::push_draw_command(drawData);
+  porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Draw);
 
   lastVertexStart = sStreamState->vertexStart + sStreamState->vertexCount;
   sStreamState.reset();

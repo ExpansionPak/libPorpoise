@@ -29,6 +29,8 @@ option(PORPOISE_BUILD_EXAMPLES "Build example programs" ON)
 option(PORPOISE_BUILD_PIKMIN_DEMO "Build the Pikmin demo target" OFF)
 option(PORPOISE_BUILD_SHARED "Build shared library" OFF)
 option(PORPOISE_USE_GECKO_MEMORY "Enable full memory emulation (locked cache support)" OFF)
+option(PORPOISE_USE_RUST_RENDERER "Build and use Rust renderer bridge backend" ON)
+option(PORPOISE_RUST_BRIDGE_ONLY "Disable OpenGL fallback when Rust bridge declines" OFF)
 
 # Output directories
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -196,6 +198,8 @@ set(PORPOISE_SOURCES
     src/gfx/texture.cpp
     src/gfx/gx_state.cpp
     src/gfx/common.cpp
+    src/gfx/render.cpp
+    src/gfx/rust_renderer_bridge.cpp
     
     # Demo Library
     src/demo/DEMOInit.cpp
@@ -223,9 +227,50 @@ set_target_properties(porpoise PROPERTIES
     LINKER_LANGUAGE CXX
 )
 
+if(PORPOISE_USE_RUST_RENDERER)
+    find_program(CARGO_EXECUTABLE cargo)
+    if(CARGO_EXECUTABLE)
+        set(PORPOISE_RUST_DIR "${CMAKE_SOURCE_DIR}/rust")
+        set(PORPOISE_RUST_TARGET_DIR "${PORPOISE_RUST_DIR}/target/release")
+        if(WIN32)
+            set(PORPOISE_RUST_LIB_FILE "${PORPOISE_RUST_TARGET_DIR}/porpoise_rust_renderer.dll")
+        elseif(APPLE)
+            set(PORPOISE_RUST_LIB_FILE "${PORPOISE_RUST_TARGET_DIR}/libporpoise_rust_renderer.dylib")
+        else()
+            set(PORPOISE_RUST_LIB_FILE "${PORPOISE_RUST_TARGET_DIR}/libporpoise_rust_renderer.so")
+        endif()
+
+        add_custom_target(porpoise_rust_renderer ALL
+            COMMAND ${CARGO_EXECUTABLE} build --release
+            WORKING_DIRECTORY "${PORPOISE_RUST_DIR}"
+            BYPRODUCTS "${PORPOISE_RUST_LIB_FILE}"
+            COMMENT "Building Rust renderer bridge"
+        )
+        add_dependencies(porpoise porpoise_rust_renderer)
+
+        add_custom_command(TARGET porpoise POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PORPOISE_RUST_LIB_FILE}"
+            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PORPOISE_RUST_LIB_FILE}"
+            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>"
+            COMMENT "Copying Rust renderer bridge library"
+        )
+    else()
+        message(WARNING "PORPOISE_USE_RUST_RENDERER is ON but cargo was not found; bridge will fall back to OpenGL path.")
+    endif()
+endif()
+
 # Enable full memory emulation if requested
 if(PORPOISE_USE_GECKO_MEMORY)
     target_compile_definitions(porpoise PUBLIC PORPOISE_USE_GECKO_MEMORY)
+endif()
+
+if(PORPOISE_RUST_BRIDGE_ONLY)
+    target_compile_definitions(porpoise PUBLIC PORPOISE_RUST_BRIDGE_ONLY=1)
 endif()
 
 # Find OpenGL (for GX viewport and rendering)
@@ -323,3 +368,5 @@ message(STATUS "  Library type: ${PORPOISE_BUILD_SHARED}")
 message(STATUS "  Build examples: ${PORPOISE_BUILD_EXAMPLES}")
 message(STATUS "  Build Pikmin demo: ${PORPOISE_BUILD_PIKMIN_DEMO}")
 message(STATUS "  Full memory emulation: ${PORPOISE_USE_GECKO_MEMORY}")
+message(STATUS "  Rust renderer bridge: ${PORPOISE_USE_RUST_RENDERER}")
+message(STATUS "  Rust bridge only mode: ${PORPOISE_RUST_BRIDGE_ONLY}")

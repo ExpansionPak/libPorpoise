@@ -15,6 +15,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <SDL.h>  /* For SDL_GL_SwapWindow */
+#include "../gfx/render.hpp"
 
 #ifdef __cplusplus
 extern "C" {
@@ -206,11 +207,18 @@ void DEMOStartVI(void)
 
 void DEMOBeforeRender(void)
 {
+    // Begin new frame - clear queued draw commands (like Aurora)
+    porpoise::gfx::begin_frame();
+    
     // GX functions removed - stubbed
 }
 
 void DEMODoneRender(void)
 {
+    // Execute all queued draw commands (deferred rendering, like Aurora)
+    static int callCount = 0;
+    porpoise::gfx::render();
+    
     // Set Z/Color update to make sure eFB will be cleared at GXCopyDisp.
     // (If you want to control these modes by yourself in your application,
     //  please comment out this part.)
@@ -218,7 +226,10 @@ void DEMODoneRender(void)
     GXSetColorUpdate(GX_TRUE);
     
     // Issue display copy command
-    GXCopyDisp(DemoCurrentBuffer, GX_TRUE);
+    // NOTE: Don't clear here - we've already rendered! Clearing would wipe out our rendering.
+    // On PC, we render directly to the OpenGL framebuffer, so we don't need to copy to XFB.
+    // GXCopyDisp is kept for API compatibility but doesn't need to clear.
+    GXCopyDisp(DemoCurrentBuffer, GX_FALSE);
 
     // Wait until everything is drawn and copied into XFB.
     GXDrawDone();
@@ -245,9 +256,11 @@ void DEMOSwapBuffers(void)
     // Wait for vertical retrace.
     VIWaitForRetrace();
     
-    // Swap OpenGL buffers to display the rendered frame
-    // This must be called after rendering is complete
-    VISwapBuffers();
+    // Rust renderer presents via WGPU surface directly. Only swap GL buffers when
+    // legacy OpenGL path rendered this frame.
+    if (!porpoise::gfx::did_render_with_bridge()) {
+        VISwapBuffers();
+    }
     
     // Swap buffers
     if (DemoCurrentBuffer == DemoFrameBuffer1)

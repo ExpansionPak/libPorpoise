@@ -50,6 +50,7 @@
 #include <dolphin/os.h>
 #include <dolphin/os/OSAlarm.h>
 #include <SDL.h>
+#include <SDL_opengl.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -110,6 +111,47 @@ static u32 s_piIntsr = 0;  // PI interrupt status register
 static OSAlarm s_retraceAlarm = {0};
 static OSTime s_frameStart = 0;  // Frame start time for position calculation
 static u32 s_field = 0;          // Current field (0=below, 1=above) for interlaced
+static BOOL s_closeRequested = FALSE;
+
+static void ProcessWindowEvents(void) {
+    if (!s_initialized || !s_window) {
+        return;
+    }
+
+    SDL_PumpEvents();
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
+            OSReport("VI: Window close requested (SDL_QUIT)\n");
+            s_closeRequested = TRUE;
+        } else if (event.type == SDL_WINDOWEVENT) {
+            switch (event.window.event) {
+                case SDL_WINDOWEVENT_CLOSE:
+                    OSReport("VI: Window close requested (SDL_WINDOWEVENT_CLOSE)\n");
+                    s_closeRequested = TRUE;
+                    break;
+                case SDL_WINDOWEVENT_RESIZED:
+                    s_windowWidth = event.window.data1;
+                    s_windowHeight = event.window.data2;
+                    OSReport("VI: Window resized to %dx%d\n", s_windowWidth, s_windowHeight);
+                    break;
+                case SDL_WINDOWEVENT_SHOWN:
+                    OSReport("VI: Window shown\n");
+                    break;
+                case SDL_WINDOWEVENT_HIDDEN:
+                    OSReport("VI: Window hidden\n");
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    // Match normal app behavior: closing the window terminates the process.
+    if (s_closeRequested) {
+        OSShutdownSystem();
+    }
+}
 
 /*---------------------------------------------------------------------------*
   Name:         RetraceEmulator
@@ -247,7 +289,8 @@ void VIInit(void) {
     // Set OpenGL attributes from config
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, s_config.openglMajor);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, s_config.openglMinor);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    // Use compatibility profile to support fixed-function pipeline (glMatrixMode, glVertexPointer, etc.)
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     
@@ -291,6 +334,12 @@ void VIInit(void) {
     
     // Explicitly show the window (though SDL_WINDOW_SHOWN should do this)
     SDL_ShowWindow(s_window);
+    
+    // Restore window if it's minimized
+    SDL_RestoreWindow(s_window);
+    
+    // Raise window to front
+    SDL_RaiseWindow(s_window);
     
     // Process one event to ensure window appears
     SDL_Event event;
@@ -397,6 +446,7 @@ void VIWaitForRetrace(void) {
     
     // Wait until retrace count increments
     while (s_retraceCount == currentCount) {
+        ProcessWindowEvents();
         OSSleepTicks(OSMillisecondsToTicks(1));
     }
 }
@@ -418,34 +468,7 @@ void VIFlush(void) {
     if (!s_initialized || !s_window) {
         return;
     }
-    
-    // Process SDL events (window close, resize, etc.)
-    // IMPORTANT: Call this periodically in your game loop for window to remain responsive
-    SDL_PumpEvents();  // Update event queue from OS
-    
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
-        if (event.type == SDL_QUIT) {
-            OSReport("VI: Window close requested\n");
-            // Game should handle this (e.g., set a flag to exit)
-        } else if (event.type == SDL_WINDOWEVENT) {
-            switch (event.window.event) {
-                case SDL_WINDOWEVENT_RESIZED:
-                    s_windowWidth = event.window.data1;
-                    s_windowHeight = event.window.data2;
-                    OSReport("VI: Window resized to %dx%d\n", s_windowWidth, s_windowHeight);
-                    break;
-                case SDL_WINDOWEVENT_SHOWN:
-                    OSReport("VI: Window shown\n");
-                    break;
-                case SDL_WINDOWEVENT_HIDDEN:
-                    OSReport("VI: Window hidden\n");
-                    break;
-                default:
-                    break;
-            }
-        }
-    }
+    ProcessWindowEvents();
     
     // Don't swap here - swap is handled by DEMOSwapBuffers() after rendering
     // This prevents double-swapping which causes flashing
@@ -811,6 +834,24 @@ void VIGetWindowSize(int* width, int* height) {
 }
 
 /*---------------------------------------------------------------------------*
+  Name:         VIMakeContextCurrent
+  
+  Description:  PC-specific: Make OpenGL context current for this thread.
+                This should be called before rendering.
+  
+  Arguments:    None
+  
+  Returns:      None
+ *---------------------------------------------------------------------------*/
+void VIMakeContextCurrent(void) {
+    if (s_window && s_glContext) {
+        if (SDL_GL_MakeCurrent(s_window, s_glContext) != 0) {
+            OSReport("[VIMakeContextCurrent] ERROR: SDL_GL_MakeCurrent failed: %s\n", SDL_GetError());
+        }
+    }
+}
+
+/*---------------------------------------------------------------------------*
   Name:         VISwapBuffers
   
   Description:  PC-specific: Swap OpenGL buffers to display rendered frame.
@@ -822,6 +863,15 @@ void VIGetWindowSize(int* width, int* height) {
  *---------------------------------------------------------------------------*/
 void VISwapBuffers(void) {
     if (s_window && s_glContext) {
+        // Check if window is minimized and restore it
+        Uint32 flags = SDL_GetWindowFlags(s_window);
+        if (flags & SDL_WINDOW_MINIMIZED) {
+            SDL_RestoreWindow(s_window);
+            SDL_RaiseWindow(s_window);
+        }
+        
+        // Ensure context is current before swapping
+        SDL_GL_MakeCurrent(s_window, s_glContext);
         SDL_GL_SwapWindow(s_window);
     }
 }

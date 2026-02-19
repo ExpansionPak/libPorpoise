@@ -4,6 +4,12 @@
 
 #include <unordered_map>
 
+namespace {
+inline void notify_texture_state() {
+  porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Texture);
+}
+} // namespace
+
 extern "C" {
 void GXInitTexObj(GXTexObj* obj_, const void* data, u16 width, u16 height, u32 format, GXTexWrapMode wrapS,
                   GXTexWrapMode wrapT, GXBool mipmap) {
@@ -33,6 +39,7 @@ void GXInitTexObj(GXTexObj* obj_, const void* data, u16 width, u16 height, u32 f
   } else {
     obj->dataInvalidated = true;
   }
+  notify_texture_state();
 }
 
 void GXInitTexObjCI(GXTexObj* obj_, const void* data, u16 width, u16 height, GXCITexFmt format, GXTexWrapMode wrapS,
@@ -63,6 +70,7 @@ void GXInitTexObjCI(GXTexObj* obj_, const void* data, u16 width, u16 height, GXC
   } else {
     obj->dataInvalidated = true;
   }
+  notify_texture_state();
 }
 
 void GXInitTexObjLOD(GXTexObj* obj_, GXTexFilter minFilt, GXTexFilter magFilt, float minLod, float maxLod,
@@ -76,6 +84,7 @@ void GXInitTexObjLOD(GXTexObj* obj_, GXTexFilter minFilt, GXTexFilter magFilt, f
   obj->biasClamp = biasClamp;
   obj->doEdgeLod = doEdgeLod;
   obj->maxAniso = maxAniso;
+  notify_texture_state();
 }
 
 void GXInitTexObjData(GXTexObj* obj_, const void* data) {
@@ -88,17 +97,20 @@ void GXInitTexObjData(GXTexObj* obj_, const void* data) {
     obj->data = data;
     obj->dataInvalidated = true;
   }
+  notify_texture_state();
 }
 
 void GXInitTexObjWrapMode(GXTexObj* obj_, GXTexWrapMode wrapS, GXTexWrapMode wrapT) {
   auto* obj = reinterpret_cast<GXTexObj_*>(obj_);
   obj->wrapS = wrapS;
   obj->wrapT = wrapT;
+  notify_texture_state();
 }
 
 void GXInitTexObjTlut(GXTexObj* obj_, u32 tlut) {
   auto* obj = reinterpret_cast<GXTexObj_*>(obj_);
   obj->tlut = static_cast<GXTlut>(tlut);
+  notify_texture_state();
 }
 
 // TODO GXInitTexObjFilter
@@ -117,17 +129,18 @@ void GXLoadTexObj(GXTexObj* obj_, GXTexMapID id) {
     char name[64];
     snprintf(name, sizeof(name), "GXLoadTexObj_%u", obj->fmt);
     obj->ref =
-        aurora::gfx::new_dynamic_texture_2d(obj->width, obj->height, u32(obj->maxLod) + 1, obj->fmt, name);
+        porpoise::gfx::new_dynamic_texture_2d(obj->width, obj->height, u32(obj->maxLod) + 1, obj->fmt, name);
   }
   if (obj->dataInvalidated) {
     // Calculate data size - simplified for now
     u32 dataSize = obj->width * obj->height * 4;  // TODO: Calculate based on format
     std::string_view data(static_cast<const char*>(obj->data), dataSize);
-    aurora::gfx::write_texture(*obj->ref, data);
+    porpoise::gfx::write_texture(*obj->ref, data);
     obj->dataInvalidated = false;
   }
   g_gxState.textures[id] = {obj->ref};
   g_gxState.stateDirty = true; // TODO only if changed?
+  notify_texture_state();
 }
 
 u32 GXGetTexBufferSize(u16 width, u16 height, u32 fmt, GXBool mips, u8 maxLod) {
@@ -214,15 +227,17 @@ void GXInitTlutObj(GXTlutObj* obj_, const void* data, GXTlutFmt format, u16 entr
     break;
   }
   auto* obj = reinterpret_cast<GXTlutObj_*>(obj_);
-  obj->ref = aurora::gfx::new_static_texture_2d(
+  obj->ref = porpoise::gfx::new_static_texture_2d(
       entries, 1, 1, texFmt,
-      aurora::ArrayRef<uint8_t>{static_cast<const uint8_t*>(data), static_cast<size_t>(entries) * 2}, true,
+      porpoise::ArrayRef<uint8_t>{static_cast<const uint8_t*>(data), static_cast<size_t>(entries) * 2}, true,
       "GXInitTlutObj");
+  notify_texture_state();
 }
 
 void GXLoadTlut(const GXTlutObj* obj_, GXTlut idx) {
   g_gxState.tluts[idx] = *reinterpret_cast<const GXTlutObj_*>(obj_);
   // TODO stateDirty?
+  notify_texture_state();
 }
 
 // TODO GXInitTexCacheRegion
