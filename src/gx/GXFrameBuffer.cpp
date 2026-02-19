@@ -1,5 +1,6 @@
 #include "gx.hpp"
 
+#include "../gfx/render.hpp"
 #include "../gfx/texture.hpp"
 #include "../gfx/gx_state.hpp"
 #include "../gfx/rust_renderer_bridge.hpp"
@@ -125,19 +126,28 @@ static inline u16 rgba8_to_rgb565(u8 r, u8 g, u8 b) {
 void GXCopyDisp(void* dest, GXBool clear) {
     if (!dest) return;
     porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Copy);
-    
+
     // Get copy dimensions (set by GXSetDispCopySrc)
     u16 width = s_dispCopyWidth;
     u16 height = s_dispCopyHeight;
-    
+
     // If dimensions not set, use default viewport size
     if (width == 0 || height == 0) {
         const auto windowSize = porpoise::window::get_window_size();
         width = windowSize.fb_width;
         height = windowSize.fb_height;
     }
-    
-    if (porpoise::gfx::bridge::copy_disp(dest, width, height, clear, g_gxState)) {
+
+    // Flush pending draws if copy would fail due to empty framebuffer (e.g. apps that
+    // call GXCopyDisp without DEMODoneRender, like mgt-single-buf)
+    if (!porpoise::gfx::bridge::copy_disp(dest, width, height, clear, g_gxState)) {
+        if (std::strcmp(porpoise::gfx::bridge::last_status(), "copy_disp_readback_failed") == 0) {
+            porpoise::gfx::render();
+            if (porpoise::gfx::bridge::copy_disp(dest, width, height, clear, g_gxState)) {
+                return;
+            }
+        }
+    } else {
         return;
     }
 #ifdef PORPOISE_RUST_BRIDGE_ONLY

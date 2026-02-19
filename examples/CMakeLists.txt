@@ -50,3 +50,18 @@ add_executable(onetri_demo onetri_demo.c)
 target_link_libraries(onetri_demo porpoise)
 target_include_directories(onetri_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+# GX octa demo (rotating octahedron from gxdemo)
+add_executable(octa_demo ${CMAKE_SOURCE_DIR}/demos/gxdemo/src/Simple/smp-octa.c)
+target_link_libraries(octa_demo porpoise)
+target_include_directories(octa_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# GX mgt-single-buf demo (rotating octahedron, single-buffer framebuffer test)
+add_executable(mgt_single_buf_demo ${CMAKE_SOURCE_DIR}/demos/gxdemo/src/Management/mgt-single-buf.c)
+target_link_libraries(mgt_single_buf_demo porpoise)
+target_include_directories(mgt_single_buf_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# GX onetri display list demo (struts via GXCallDisplayList)
+add_executable(onetri_dl_demo ${CMAKE_SOURCE_DIR}/demos/gxdemo/src/Simple/smp-onetri_dl.c)
+target_link_libraries(onetri_dl_demo porpoise)
+target_include_directories(onetri_dl_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
