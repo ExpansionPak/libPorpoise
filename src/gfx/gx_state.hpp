@@ -242,6 +242,16 @@ struct GXState {
   GXTexFmt texCopyFmt = GX_TF_I4;
   std::unordered_map<const void*, TextureHandle*> copyTextures;
   std::optional<porpoise::ByteBuffer> dynamicDlBuf;
+  u32 scissorLeft = 0;
+  u32 scissorTop = 0;
+  u32 scissorWd = 0;
+  u32 scissorHt = 0;
+  float viewportLeft = 0.f;
+  float viewportTop = 0.f;
+  float viewportWidth = 0.f;
+  float viewportHeight = 0.f;
+  float viewportNear = 0.f;
+  float viewportFar = 1.f;
   bool depthCompare = true;
   bool depthUpdate = true;
   bool colorUpdate = true;

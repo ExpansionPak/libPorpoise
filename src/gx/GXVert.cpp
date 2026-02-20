@@ -84,7 +84,9 @@ private:
   void inc_vertex_count() noexcept {
     auto curVertex = vertexStart + vertexCount;
     if (primitive == GX_LINES || primitive == GX_LINESTRIP || primitive == GX_POINTS) {
-      // Currently unsupported, skip
+      // Sequential indices for lines/points (no fan/strip index logic)
+      indices.push_back(curVertex);
+      ++vertexCount;
       return;
     }
     if (primitive == GX_TRIANGLES || primitive == GX_TRIANGLESTRIP || vertexCount < 3) {
@@ -735,8 +737,20 @@ void GXEnd() {
   drawData.primitive = sStreamState->primitive;
   drawData.vtxFmt = sStreamState->vtxFmt;
   drawData.dstAlpha = g_gxState.dstAlpha;
-  drawData.posArrayStride = g_gxState.arrays[GX_VA_POS].stride;
-  drawData.colorArrayStride = g_gxState.arrays[GX_VA_CLR0].stride;
+  // For GX_DIRECT, arrays[].stride is not used; use attribute size from format
+  auto direct_stride = [](GXAttr attr, GXAttrType type) -> u32 {
+    if (type != GX_DIRECT) return 0;
+    if (attr == GX_VA_POS || attr == GX_VA_NRM) return 12;
+    if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) return 16;
+    if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) return 8;
+    return 0;
+  };
+  drawData.posArrayStride = g_gxState.arrays[GX_VA_POS].stride > 0
+      ? g_gxState.arrays[GX_VA_POS].stride
+      : direct_stride(GX_VA_POS, g_gxState.vtxDesc[GX_VA_POS]);
+  drawData.colorArrayStride = g_gxState.arrays[GX_VA_CLR0].stride > 0
+      ? g_gxState.arrays[GX_VA_CLR0].stride
+      : direct_stride(GX_VA_CLR0, g_gxState.vtxDesc[GX_VA_CLR0]);
   for (int i = 0; i < 16; ++i) {
     drawData.modelView[i] = 0.0f;
   }
@@ -747,6 +761,24 @@ void GXEnd() {
       drawData.modelView[col * 4 + row] = pnMtx.pos(row, col);
     }
   }
+  for (int i = 0; i < 16; ++i) {
+    drawData.proj[i] = g_gxState.proj.m[i];
+  }
+  drawData.viewportLeft = g_gxState.viewportLeft;
+  drawData.viewportTop = g_gxState.viewportTop;
+  drawData.viewportWidth = g_gxState.viewportWidth;
+  drawData.viewportHeight = g_gxState.viewportHeight;
+  drawData.viewportNear = g_gxState.viewportNear;
+  drawData.viewportFar = g_gxState.viewportFar;
+  drawData.scissorLeft = g_gxState.scissorLeft;
+  drawData.scissorTop = g_gxState.scissorTop;
+  drawData.scissorWd = g_gxState.scissorWd;
+  drawData.scissorHt = g_gxState.scissorHt;
+  const auto& chan0 = g_gxState.colorChannelState[0];
+  drawData.matColor[0] = chan0.matColor.x();
+  drawData.matColor[1] = chan0.matColor.y();
+  drawData.matColor[2] = chan0.matColor.z();
+  drawData.matColor[3] = chan0.matColor.w();
 
   u32 indexedOffset = 0;
   for (GXAttr attr = GX_VA_POS; attr < GX_VA_MAX_ATTR; attr = static_cast<GXAttr>(attr + 1)) {

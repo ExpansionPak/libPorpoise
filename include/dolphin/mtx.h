@@ -29,6 +29,14 @@ void MTXTrans(Mtx m, f32 xT, f32 yT, f32 zT);
 void MTXScale(Mtx m, f32 xS, f32 yS, f32 zS);
 void MTXLookAt(Mtx m, const Point3d* camPos, const Vec* camUp, const Point3d* target);
 void MTXFrustum(Mtx44 m, f32 t, f32 b, f32 l, f32 r, f32 n, f32 f);
+void MTXRotDeg(Mtx m, char axis, f32 deg);
+void MTXPerspective(Mtx44 m, f32 fovY, f32 aspect, f32 n, f32 f);
+void MTXOrtho(Mtx44 m, f32 top, f32 bottom, f32 left, f32 right, f32 nearZ, f32 farZ);
+void MTXMultVec(const Mtx m, const Vec* src, Vec* dst);
+f32 VECDotProduct(const Vec* a, const Vec* b);
+void VECNormalize(const Vec* src, Vec* dst);
+void VECAdd(const Vec* a, const Vec* b, Vec* ab);
+void VECScale(const Vec* src, Vec* dst, f32 scale);
 
 /* Paired-single helpers */
 void PSMTXIdentity(Mtx m);

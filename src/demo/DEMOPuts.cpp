@@ -9,6 +9,9 @@
 
 #include <dolphin/demo.h>
 #include <dolphin/os.h>
+#include <dolphin/mtx.h>
+#include <dolphin/gx/GXTransform.h>
+#include <dolphin/gx/GXGeometry.h>
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -23,9 +26,15 @@ void DEMOSetFontType(s32 type) {
     // Stub
 }
 
-void DEMOSetupScrnSpc(s32 x, s32 y, f32 z) {
-    (void)x; (void)y; (void)z;
-    // Stub
+void DEMOSetupScrnSpc(s32 width, s32 height, f32 depth) {
+    Mtx44 pMtx;
+    Mtx mMtx;
+    // Screen space: Y top=0 to bottom=height, X left=0 to right=width, Z 0 to -depth
+    MTXOrtho(pMtx, 0.0f, (f32)height, 0.0f, (f32)width, 0.0f, -depth);
+    GXSetProjection(pMtx, GX_ORTHOGRAPHIC);
+    MTXIdentity(mMtx);
+    GXLoadPosMtxImm(mMtx, GX_PNMTX0);
+    GXSetCurrentMtx(GX_PNMTX0);
 }
 
 void DEMOInitCaption(s32 x, s32 y, s32 z) {

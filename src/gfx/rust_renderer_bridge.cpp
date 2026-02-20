@@ -38,6 +38,11 @@ struct RustDrawCommand {
   u32 pos_array_stride;
   u32 color_array_stride;
   float model_view[16];
+  float proj[16];
+  float viewport_left, viewport_top, viewport_width, viewport_height;
+  float viewport_near, viewport_far;
+  u32 scissor_left, scissor_top, scissor_wd, scissor_ht;
+  float mat_color[4];
   std::array<RustRange, GX_VA_MAX_ATTR> array_ranges;
 };
 
@@ -60,6 +65,10 @@ struct RustFrameState {
   u32 num_tev_stages;
   u32 num_tex_gens;
   u32 num_chans;
+  u32 scissor_left;
+  u32 scissor_top;
+  u32 scissor_wd;
+  u32 scissor_ht;
 };
 
 using InitFn = int (*)();
@@ -68,7 +77,7 @@ using NotifyStateFn = void (*)(u32);
 using BeginFrameFn = int (*)(const RustFrameState*);
 using PushDrawFn = void (*)(const RustDrawCommand*);
 using RenderFn = int (*)(const u8*, u32, const u8*, u32, const RustFrameState*);
-using CopyDispFn = int (*)(void*, u16, u16, u8, const RustFrameState*);
+using CopyDispFn = int (*)(void*, u16, u16, u16, u16, u8, const RustFrameState*);
 using CopyTexFn = int (*)(void*, u16, u16, u16, u16, u32, u8, const RustFrameState*);
 using SetWindowFn = void (*)(u64, u64, u32, u32);
 using LastStatusFn = const char* (*)();
@@ -132,6 +141,10 @@ RustFrameState to_rust_frame_state(const gx::GXState& state) {
   out.num_tev_stages = state.numTevStages;
   out.num_tex_gens = state.numTexGens;
   out.num_chans = state.numChans;
+  out.scissor_left = state.scissorLeft;
+  out.scissor_top = state.scissorTop;
+  out.scissor_wd = state.scissorWd;
+  out.scissor_ht = state.scissorHt;
   return out;
 }
 
@@ -152,6 +165,20 @@ RustDrawCommand to_rust_draw(const DrawData& data) {
   out.color_array_stride = data.colorArrayStride;
   for (int i = 0; i < 16; ++i) {
     out.model_view[i] = data.modelView[i];
+    out.proj[i] = data.proj[i];
+  }
+  out.viewport_left = data.viewportLeft;
+  out.viewport_top = data.viewportTop;
+  out.viewport_width = data.viewportWidth;
+  out.viewport_height = data.viewportHeight;
+  out.viewport_near = data.viewportNear;
+  out.viewport_far = data.viewportFar;
+  out.scissor_left = data.scissorLeft;
+  out.scissor_top = data.scissorTop;
+  out.scissor_wd = data.scissorWd;
+  out.scissor_ht = data.scissorHt;
+  for (int i = 0; i < 4; ++i) {
+    out.mat_color[i] = data.matColor[i];
   }
   for (u32 i = 0; i < GX_VA_MAX_ATTR; ++i) {
     out.array_ranges[i] = {data.arrayRanges[i].offset, data.arrayRanges[i].size};
@@ -281,13 +308,13 @@ bool render(const std::vector<u8>& vertex_buffer, const std::vector<u8>& index_b
   return handled;
 }
 
-bool copy_disp(void* dest, u16 width, u16 height, GXBool clear, const gx::GXState& state) {
+bool copy_disp(void* dest, u16 left, u16 top, u16 width, u16 height, GXBool clear, const gx::GXState& state) {
   if (!ensure_loaded()) {
     g_lastStatus = "bridge_not_loaded";
     return false;
   }
   const auto frame_state = to_rust_frame_state(state);
-  const bool handled = g_api.copy_disp(dest, width, height, clear == GX_TRUE ? 1u : 0u, &frame_state) != 0;
+  const bool handled = g_api.copy_disp(dest, left, top, width, height, clear == GX_TRUE ? 1u : 0u, &frame_state) != 0;
   g_lastStatus = g_api.last_status();
   return handled;
 }

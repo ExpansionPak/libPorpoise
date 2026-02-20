@@ -60,6 +60,9 @@ extern "C" {
 #define VI_XFBMODE_SF               0  // Single field
 #define VI_XFBMODE_DF               1  // Double field
 
+// Pad framebuffer width to multiple of 16 (for EFB/XFB layout)
+#define VIPadFrameBufferWidth(width) ((u16)(((u16)(width) + 15) & (u16)~15))
+
 /*---------------------------------------------------------------------------*
     Types
  *---------------------------------------------------------------------------*/

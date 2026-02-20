@@ -26,6 +26,8 @@ constexpr u32 kMaxXfbLines = 1024;
 constexpr u32 kYScaleMask = 0x1FF;
 constexpr f32 kYScaleRegisterScale = 256.0f;
 
+u16 s_dispCopyLeft = 0;
+u16 s_dispCopyTop = 0;
 u16 s_dispCopyWidth = 0;
 u16 s_dispCopyHeight = 0;
 
@@ -68,6 +70,9 @@ extern "C" {
 GXRenderModeObj GXNtsc480IntDf = {
     VI_TVMODE_NTSC_INT, 640, 480, 480, 40, 0, 640, 480, VI_XFBMODE_DF, 0, 0,
 };
+GXRenderModeObj GXNtsc480IntAa = {
+    VI_TVMODE_NTSC_INT, 640, 480, 480, 40, 0, 640, 480, VI_XFBMODE_DF, 0, 1,
+};
 GXRenderModeObj GXPal528IntDf = {
     VI_TVMODE_PAL_INT, 704, 528, 480, 40, 0, 640, 480, VI_XFBMODE_DF, 0, 0,
 };
@@ -85,8 +90,8 @@ void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor,
 }
 
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
-  (void)left;
-  (void)top;
+  s_dispCopyLeft = left;
+  s_dispCopyTop = top;
   s_dispCopyWidth = wd;
   s_dispCopyHeight = ht;
 }
@@ -101,7 +106,10 @@ void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
 }
 
 // TODO GXSetDispCopyFrame2Field
-// TODO GXSetCopyClamp
+
+void GXSetCopyClamp(GXFBClamp clamp) {
+  (void)clamp;
+}
 
 u32 GXSetDispCopyYScale(f32 vscale) {
   if (vscale <= 0.0f || s_dispCopyHeight == 0) {
@@ -127,23 +135,27 @@ void GXCopyDisp(void* dest, GXBool clear) {
     if (!dest) return;
     porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Copy);
 
-    // Get copy dimensions (set by GXSetDispCopySrc)
+    // Render pending draws before copy (frb_aa_full calls GXCopyDisp without DEMODoneRender)
+    porpoise::gfx::render_before_copy();
+
+    // Get copy region (set by GXSetDispCopySrc)
+    u16 left = s_dispCopyLeft;
+    u16 top = s_dispCopyTop;
     u16 width = s_dispCopyWidth;
     u16 height = s_dispCopyHeight;
 
-    // If dimensions not set, use default viewport size
     if (width == 0 || height == 0) {
         const auto windowSize = porpoise::window::get_window_size();
         width = windowSize.fb_width;
         height = windowSize.fb_height;
+        left = 0;
+        top = 0;
     }
 
-    // Flush pending draws if copy would fail due to empty framebuffer (e.g. apps that
-    // call GXCopyDisp without DEMODoneRender, like mgt-single-buf)
-    if (!porpoise::gfx::bridge::copy_disp(dest, width, height, clear, g_gxState)) {
+    // Try Rust bridge first
+    if (!porpoise::gfx::bridge::copy_disp(dest, left, top, width, height, clear, g_gxState)) {
         if (std::strcmp(porpoise::gfx::bridge::last_status(), "copy_disp_readback_failed") == 0) {
-            porpoise::gfx::render();
-            if (porpoise::gfx::bridge::copy_disp(dest, width, height, clear, g_gxState)) {
+            if (porpoise::gfx::bridge::copy_disp(dest, left, top, width, height, clear, g_gxState)) {
                 return;
             }
         }
@@ -159,28 +171,22 @@ void GXCopyDisp(void* dest, GXBool clear) {
     return;
 #endif
 
-    // If clear is requested, clear the OpenGL framebuffer with the clear color
-    // This matches GameCube behavior where GXCopyDisp clears the EFB before copying
-    if (clear) {
-        const auto& clearColor = g_gxState.clearColor;
-        glClearColor(clearColor.x(), clearColor.y(), clearColor.z(), clearColor.w());
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    }
-    
-    // Read pixels from OpenGL framebuffer (RGBA8 format)
-    // Note: OpenGL reads from bottom-left, but we want top-left
-    // So we read the entire buffer and flip it
-    std::vector<u8> rgbaBuffer(width * height * 4);
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgbaBuffer.data());
-    
-    // Convert RGBA8 to RGB565 and write to destination
-    // Flip vertically (OpenGL is bottom-up, GameCube is top-down)
+    {
+    // OpenGL path: read region from framebuffer
+    // GX uses top-left origin; OpenGL uses bottom-left - convert Y
+    const auto windowSize = porpoise::window::get_window_size();
+    GLint glX = static_cast<GLint>(left);
+    GLint glY = static_cast<GLint>(windowSize.fb_height) - static_cast<GLint>(top) - static_cast<GLint>(height);
+
+    std::vector<u8> rgbaBuffer(static_cast<size_t>(width) * height * 4);
+    glReadPixels(glX, glY, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgbaBuffer.data());
+
+    // Convert RGBA8 to RGB565, flip Y (OpenGL row 0 = bottom, GX row 0 = top)
     u16* dest16 = static_cast<u16*>(dest);
     for (u16 y = 0; y < height; ++y) {
-        u16 srcY = height - 1 - y; // Flip Y coordinate
-        const u8* srcRow = rgbaBuffer.data() + (srcY * width * 4);
+        u16 srcY = height - 1 - y;
+        const u8* srcRow = rgbaBuffer.data() + (static_cast<size_t>(srcY) * width * 4);
         u16* destRow = dest16 + (y * width);
-        
         for (u16 x = 0; x < width; ++x) {
             u8 r = srcRow[x * 4 + 0];
             u8 g = srcRow[x * 4 + 1];
@@ -188,6 +194,13 @@ void GXCopyDisp(void* dest, GXBool clear) {
             destRow[x] = rgba8_to_rgb565(r, g, b);
         }
     }
+    }
+
+    // Clear AFTER copy. On real GX this resets the EFB for the next pass.
+    // For frb_aa_full we must NOT clear: pass 2 draws the bottom half (scissored) on top of
+    // the existing buffer, and we need the full composite when we swap. Clearing would wipe
+    // the top half. Skip clear for now so full-frame AA shows correctly.
+    (void)clear;
 }
 
 void GXCopyTex(void* dest, GXBool clear) {

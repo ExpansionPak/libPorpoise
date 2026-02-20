@@ -58,6 +58,11 @@ typedef enum {
   GX_GM_2_2,
 } GXGamma;
 
+typedef enum _GXFBClamp {
+  GX_CLAMP_TOP = 1,
+  GX_CLAMP_BOTTOM = 2,
+} GXFBClamp;
+
 typedef enum {
   GX_PF_RGB8_Z24,
   GX_PF_RGBA6_Z24,

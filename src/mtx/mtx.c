@@ -205,3 +205,172 @@ void MTXLookAt(Mtx m, const Point3d* camPos, const Vec* camUp, const Point3d* ta
     m[2][3] = -(f.x * camPos->x + f.y * camPos->y + f.z * camPos->z);
 }
 
+/*---------------------------------------------------------------------------*
+    Name:           MTXScale
+
+    Description:    Creates a scale matrix (3x4). In-place; overwrites m.
+
+    Arguments:      m      output matrix
+                    xS     scale in X
+                    yS     scale in Y
+                    zS     scale in Z
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void MTXScale(Mtx m, f32 xS, f32 yS, f32 zS) {
+    m[0][0] = xS;
+    m[0][1] = 0.0f;
+    m[0][2] = 0.0f;
+    m[0][3] = 0.0f;
+    m[1][0] = 0.0f;
+    m[1][1] = yS;
+    m[1][2] = 0.0f;
+    m[1][3] = 0.0f;
+    m[2][0] = 0.0f;
+    m[2][1] = 0.0f;
+    m[2][2] = zS;
+    m[2][3] = 0.0f;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXPerspective
+
+    Description:    Creates a perspective projection matrix (4x4).
+                    fovY is vertical field of view in degrees.
+
+    Arguments:      m      output matrix (Mtx44)
+                    fovY   vertical FOV in degrees
+                    aspect aspect ratio (width/height)
+                    n      near clipping plane
+                    f      far clipping plane
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void MTXPerspective(Mtx44 m, f32 fovY, f32 aspect, f32 n, f32 f) {
+    f32 cot;
+    f32 nf;
+
+    cot = 1.0f / (float)tan(MTXDegToRad(fovY) * 0.5f);
+    nf = 1.0f / (n - f);
+
+    m[0][0] = cot / aspect;
+    m[0][1] = 0.0f;
+    m[0][2] = 0.0f;
+    m[0][3] = 0.0f;
+
+    m[1][0] = 0.0f;
+    m[1][1] = cot;
+    m[1][2] = 0.0f;
+    m[1][3] = 0.0f;
+
+    m[2][0] = 0.0f;
+    m[2][1] = 0.0f;
+    m[2][2] = (f + n) * nf;
+    m[2][3] = (2.0f * f * n) * nf;
+
+    m[3][0] = 0.0f;
+    m[3][1] = 0.0f;
+    m[3][2] = -1.0f;
+    m[3][3] = 0.0f;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXOrtho
+
+    Description:    Creates an orthographic projection matrix (4x4).
+
+    Arguments:      m      output matrix (Mtx44)
+                    t      top
+                    b      bottom
+                    l      left
+                    r      right
+                    nearZ  near clipping plane
+                    farZ   far clipping plane
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void MTXOrtho(Mtx44 m, f32 t, f32 b, f32 l, f32 r, f32 nearZ, f32 farZ) {
+    f32 w = 1.0f / (r - l);
+    f32 h = 1.0f / (t - b);
+    f32 d = 1.0f / (farZ - nearZ);
+
+    m[0][0] = 2.0f * w;
+    m[0][1] = 0.0f;
+    m[0][2] = 0.0f;
+    m[0][3] = -(r + l) * w;
+
+    m[1][0] = 0.0f;
+    m[1][1] = 2.0f * h;
+    m[1][2] = 0.0f;
+    m[1][3] = -(t + b) * h;
+
+    m[2][0] = 0.0f;
+    m[2][1] = 0.0f;
+    m[2][2] = -2.0f * d;
+    m[2][3] = -(farZ + nearZ) * d;
+
+    m[3][0] = 0.0f;
+    m[3][1] = 0.0f;
+    m[3][2] = 0.0f;
+    m[3][3] = 1.0f;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXMultVec
+
+    Description:    Multiplies 3x4 matrix m by 3D vector src (with implicit w=1),
+                    stores result in dst.
+
+    Arguments:      m    matrix
+                    src  input vector
+                    dst  output vector
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void MTXMultVec(const Mtx m, const Vec* src, Vec* dst) {
+    f32 x = src->x;
+    f32 y = src->y;
+    f32 z = src->z;
+    dst->x = m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3];
+    dst->y = m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3];
+    dst->z = m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3];
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           VECDotProduct
+
+    Description:    Returns dot product of vectors a and b.
+
+    Arguments:      a   first vector
+                    b   second vector
+
+    Returns:        a.x*b.x + a.y*b.y + a.z*b.z
+ *---------------------------------------------------------------------------*/
+f32 VECDotProduct(const Vec* a, const Vec* b) {
+    return a->x * b->x + a->y * b->y + a->z * b->z;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           VECNormalize
+
+    Description:    Normalizes src and stores in dst.
+
+    Arguments:      src  input vector
+                    dst  output unit vector
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void VECNormalize(const Vec* src, Vec* dst) {
+    f32 len = sqrtf(src->x * src->x + src->y * src->y + src->z * src->z);
+    if (len > 0.0f) {
+        f32 inv = 1.0f / len;
+        dst->x = src->x * inv;
+        dst->y = src->y * inv;
+        dst->z = src->z * inv;
+    } else {
+        dst->x = 0.0f;
+        dst->y = 0.0f;
+        dst->z = 0.0f;
+    }
+}
+

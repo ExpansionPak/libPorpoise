@@ -28,7 +28,7 @@ bool render(const std::vector<u8>& vertex_buffer,
             const std::vector<u8>& index_buffer,
             const gx::GXState& state);
 
-bool copy_disp(void* dest, u16 width, u16 height, GXBool clear, const gx::GXState& state);
+bool copy_disp(void* dest, u16 left, u16 top, u16 width, u16 height, GXBool clear, const gx::GXState& state);
 bool copy_tex(void* dest, const ClipRect& rect, GXTexFmt fmt, GXBool clear, const gx::GXState& state);
 const char* last_status();
 

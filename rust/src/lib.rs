@@ -34,6 +34,18 @@ pub struct RustDrawCommand {
     pub pos_array_stride: u32,
     pub color_array_stride: u32,
     pub model_view: [f32; 16],
+    pub proj: [f32; 16],
+    pub viewport_left: f32,
+    pub viewport_top: f32,
+    pub viewport_width: f32,
+    pub viewport_height: f32,
+    pub viewport_near: f32,
+    pub viewport_far: f32,
+    pub scissor_left: u32,
+    pub scissor_top: u32,
+    pub scissor_wd: u32,
+    pub scissor_ht: u32,
+    pub mat_color: [f32; 4],
     pub array_ranges: [RustRange; 26],
 }
 
@@ -58,6 +70,10 @@ pub struct RustFrameState {
     pub num_tev_stages: u32,
     pub num_tex_gens: u32,
     pub num_chans: u32,
+    pub scissor_left: u32,
+    pub scissor_top: u32,
+    pub scissor_wd: u32,
+    pub scissor_ht: u32,
 }
 
 #[derive(Default)]
@@ -163,16 +179,6 @@ fn mul_mat4_vec4_col_major(m: &[f32; 16], v: [f32; 4]) -> [f32; 4] {
         m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14] * v[3],
         m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3],
     ]
-}
-
-/// Returns projection matrix with Y row negated (flip view right-side up without shader Y flip).
-fn proj_flip_y(proj: &[f32; 16]) -> [f32; 16] {
-    let mut p = *proj;
-    p[1] = -p[1];
-    p[5] = -p[5];
-    p[9] = -p[9];
-    p[13] = -p[13];
-    p
 }
 
 #[repr(C)]
@@ -357,11 +363,9 @@ fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
     let world = transforms.model_view * vec4<f32>(in.pos, 1.0);
     out.pos = transforms.proj * world;
-    // TEMPORARY: Mirror Z for depth ordering. GX clip z in [-w, 0]; we use z += w so NDC in [0,1]
-    // (0=near, 1=far) with standard depth clear 1.0 and Less. This may not match true GX depth
-    // semantics; proper mapping TBD.
+    // GX NDC differs from GL: Z in [-1,0] (gx.pdf §5.2). WGPU expects Z [0,1].
+    // Modelview has 180° roll applied for orientation; here only Z remap.
     out.pos.z = out.pos.z + out.pos.w;
-    // Y flip only in projection (proj_flip_y); no shader flip or screen is black.
     out.color = in.color;
     return out;
 }
@@ -518,6 +522,50 @@ fn map_primitive_topology(p: u32) -> Option<wgpu::PrimitiveTopology> {
     }
 }
 
+/// Expand LineList to TriangleList (thin quads) for reliable visibility.
+/// wgpu 1px lines can rasterize poorly on some backends.
+fn expand_lines_to_quads(verts: &[Vertex], inds: &[u32]) -> Option<(Vec<Vertex>, Vec<u32>)> {
+    if inds.len() < 2 || inds.len() % 2 != 0 {
+        return None;
+    }
+    let half_w = 0.75f32; // ~1.5px width in object space (works for screen-space rects)
+    let mut out_verts = Vec::with_capacity((inds.len() / 2) * 4);
+    let mut out_inds = Vec::with_capacity((inds.len() / 2) * 6);
+    let mut base = 0u32;
+    for chunk in inds.chunks_exact(2) {
+        let ia = chunk[0] as usize;
+        let ib = chunk[1] as usize;
+        if ia >= verts.len() || ib >= verts.len() {
+            continue;
+        }
+        let a = &verts[ia];
+        let b = &verts[ib];
+        let dx = b.pos[0] - a.pos[0];
+        let dy = b.pos[1] - a.pos[1];
+        let len = (dx * dx + dy * dy).sqrt();
+        let (nx, ny) = if len > 1e-6f32 {
+            (-dy / len * half_w, dx / len * half_w)
+        } else {
+            (half_w, 0.0)
+        };
+        let c = a.color;
+        let v0 = Vertex { pos: [a.pos[0] + nx, a.pos[1] + ny, a.pos[2]], color: c };
+        let v1 = Vertex { pos: [a.pos[0] - nx, a.pos[1] - ny, a.pos[2]], color: c };
+        let v2 = Vertex { pos: [b.pos[0] - nx, b.pos[1] - ny, b.pos[2]], color: c };
+        let v3 = Vertex { pos: [b.pos[0] + nx, b.pos[1] + ny, b.pos[2]], color: c };
+        out_verts.push(v0);
+        out_verts.push(v1);
+        out_verts.push(v2);
+        out_verts.push(v3);
+        out_inds.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        base += 4;
+    }
+    if out_verts.is_empty() {
+        return None;
+    }
+    Some((out_verts, out_inds))
+}
+
 fn encode_pipeline_key(frame_state: &RustFrameState, topology: wgpu::PrimitiveTopology) -> u64 {
     let mut key = 0u64;
     key |= (topology as u64) & 0x7;
@@ -584,7 +632,7 @@ fn build_pipeline(
         write_mask = wgpu::ColorWrites::ALL;
     }
 
-    // GX front face is CCW; cull back faces for correct solid geometry.
+    // Cull mode: GX_CULL_BACK etc. "Front" is Cw (matches GX CW).
     let cull_mode = match frame_state.cull_mode {
         GX_CULL_NONE => None,
         GX_CULL_FRONT => Some(wgpu::Face::Front),
@@ -598,6 +646,9 @@ fn build_pipeline(
             bind_group_layouts: &[transform_layout],
             push_constant_ranges: &[],
         });
+
+    let is_line = topology == wgpu::PrimitiveTopology::LineList
+        || topology == wgpu::PrimitiveTopology::LineStrip;
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("porpoise-rust-pipeline"),
@@ -624,10 +675,13 @@ fn build_pipeline(
                 conservative: false,
             },
             // Note: Depth uses a temporary "mirror Z" (z += w, clear 1.0, Less). May not match GX exactly.
+            // Lines (2D overlays, viewport/scissor rects): no depth write, always pass - draw on top
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: frame_state.depth_update != 0,
-                depth_compare: if frame_state.depth_compare != 0 {
+                depth_write_enabled: if is_line { false } else { frame_state.depth_update != 0 },
+                depth_compare: if is_line {
+                    wgpu::CompareFunction::Always
+                } else if frame_state.depth_compare != 0 {
                     map_compare_mode(frame_state.depth_func)
                 } else {
                     wgpu::CompareFunction::Always
@@ -723,27 +777,86 @@ fn read_index(data: &[u8], offset: usize, size: u32) -> Option<u32> {
 }
 
 fn expand_draw_vertices(draw: &RustDrawCommand, vertex_bytes: &[u8], index_bytes: &[u8]) -> Option<(Vec<Vertex>, Vec<u32>)> {
-    if draw.indexed_stride == 0 || draw.pos_index_size == 0 || draw.color_index_size == 0 {
-        return None;
-    }
-    if draw.pos_index_offset >= draw.indexed_stride || draw.color_index_offset >= draw.indexed_stride {
-        return None;
-    }
-    let pos_arr = draw.array_ranges[9];
-    let clr_arr = draw.array_ranges[11];
-    if pos_arr.size == 0 || clr_arr.size == 0 {
-        return None;
-    }
     let vert_start = draw.vert_range.offset as usize;
     let vert_len = draw.vert_range.size as usize;
-    if vert_start.checked_add(vert_len)? > vertex_bytes.len() {
+    if vert_start.checked_add(vert_len)? > vertex_bytes.len() || vert_len == 0 {
+        return None;
+    }
+
+    // Direct (non-indexed) position-only or position+color: vertex buffer is packed vertex data
+    let pos_arr = draw.array_ranges[9];
+    let clr_arr = draw.array_ranges[11];
+    let has_color_arr = clr_arr.size > 0 && draw.color_array_stride > 0;
+
+    if draw.indexed_stride == 0 {
+        // GX_DIRECT draws: vertices are stored directly in vert_range (packed pos, optional color)
+        // When C++ doesn't set pos_array_stride (direct attr), use 12 for position-only
+        let pos_stride = if draw.pos_array_stride > 0 {
+            draw.pos_array_stride as usize
+        } else {
+            12
+        };
+        if pos_stride < 12 {
+            return None;
+        }
+        let clr_stride_direct = draw.color_array_stride as usize;
+        let stride = if clr_stride_direct > 0 {
+            pos_stride + clr_stride_direct
+        } else {
+            pos_stride
+        };
+        let mut output_vertices = Vec::new();
+        let mut output_indices = Vec::new();
+        let mut idx = 0u32;
+        let mut off = vert_start;
+        while off + pos_stride <= vert_start + vert_len && off + 12 <= vertex_bytes.len() {
+            let px = f32::from_le_bytes(vertex_bytes[off..off + 4].try_into().unwrap());
+            let py = f32::from_le_bytes(vertex_bytes[off + 4..off + 8].try_into().unwrap());
+            let pz = f32::from_le_bytes(vertex_bytes[off + 8..off + 12].try_into().unwrap());
+            let (r, g, b, a) = if clr_stride_direct >= 4 && off + pos_stride + 4 <= vertex_bytes.len() {
+                let clr_off = off + pos_stride;
+                (
+                    vertex_bytes[clr_off] as f32 / 255.0,
+                    vertex_bytes[clr_off + 1] as f32 / 255.0,
+                    vertex_bytes[clr_off + 2] as f32 / 255.0,
+                    vertex_bytes[clr_off + 3] as f32 / 255.0,
+                )
+            } else {
+                (
+                    draw.mat_color[0],
+                    draw.mat_color[1],
+                    draw.mat_color[2],
+                    draw.mat_color[3],
+                )
+            };
+            output_indices.push(idx);
+            output_vertices.push(Vertex {
+                pos: [px, py, pz],
+                color: [r, g, b, a],
+            });
+            idx += 1;
+            off += stride;
+        }
+        if output_vertices.is_empty() {
+            return None;
+        }
+        return Some((output_vertices, output_indices));
+    }
+
+    if draw.pos_index_size == 0 {
+        return None;
+    }
+    if draw.pos_index_offset >= draw.indexed_stride {
+        return None;
+    }
+    if has_color_arr && (draw.color_index_size == 0 || draw.color_index_offset >= draw.indexed_stride) {
+        return None;
+    }
+    if pos_arr.size == 0 {
         return None;
     }
 
     let stride = draw.indexed_stride as usize;
-    if stride == 0 {
-        return None;
-    }
     let attr_sets = vert_len / stride;
     if attr_sets == 0 {
         return None;
@@ -784,8 +897,15 @@ fn expand_draw_vertices(draw: &RustDrawCommand, vertex_bytes: &[u8], index_bytes
     let pos_base = pos_arr.offset as usize;
     let clr_base = clr_arr.offset as usize;
     let pos_stride = draw.pos_array_stride as usize;
-    let clr_stride = draw.color_array_stride as usize;
-    if pos_stride == 0 || clr_stride == 0 {
+    let clr_stride = if has_color_arr {
+        draw.color_array_stride as usize
+    } else {
+        0
+    };
+    if pos_stride == 0 {
+        return None;
+    }
+    if has_color_arr && clr_stride == 0 {
         return None;
     }
 
@@ -797,24 +917,51 @@ fn expand_draw_vertices(draw: &RustDrawCommand, vertex_bytes: &[u8], index_bytes
         let attr_base = vert_start + attr_idx * stride;
         let pos_idx =
             read_index(vertex_bytes, attr_base + draw.pos_index_offset as usize, draw.pos_index_size)?;
-        let clr_idx = read_index(
-            vertex_bytes,
-            attr_base + draw.color_index_offset as usize,
-            draw.color_index_size,
-        )?;
 
         let pos_off = pos_base + (pos_idx as usize) * pos_stride;
-        let clr_off = clr_base + (clr_idx as usize) * clr_stride;
-        if pos_off + 6 > vertex_bytes.len() || clr_off + 4 > vertex_bytes.len() {
+        let (px, py, pz) = if pos_stride >= 12 && pos_off + 12 <= vertex_bytes.len() {
+            let px = f32::from_le_bytes(vertex_bytes[pos_off..pos_off + 4].try_into().unwrap());
+            let py = f32::from_le_bytes(vertex_bytes[pos_off + 4..pos_off + 8].try_into().unwrap());
+            let pz = f32::from_le_bytes(vertex_bytes[pos_off + 8..pos_off + 12].try_into().unwrap());
+            (px, py, pz)
+        } else if pos_off + 6 <= vertex_bytes.len() {
+            let px = i16::from_le_bytes([vertex_bytes[pos_off], vertex_bytes[pos_off + 1]]) as f32;
+            let py = i16::from_le_bytes([vertex_bytes[pos_off + 2], vertex_bytes[pos_off + 3]]) as f32;
+            let pz = i16::from_le_bytes([vertex_bytes[pos_off + 4], vertex_bytes[pos_off + 5]]) as f32;
+            (px, py, pz)
+        } else {
             continue;
-        }
-        let px = i16::from_le_bytes([vertex_bytes[pos_off], vertex_bytes[pos_off + 1]]) as f32;
-        let py = i16::from_le_bytes([vertex_bytes[pos_off + 2], vertex_bytes[pos_off + 3]]) as f32;
-        let pz = i16::from_le_bytes([vertex_bytes[pos_off + 4], vertex_bytes[pos_off + 5]]) as f32;
-        let r = vertex_bytes[clr_off] as f32 / 255.0;
-        let g = vertex_bytes[clr_off + 1] as f32 / 255.0;
-        let b = vertex_bytes[clr_off + 2] as f32 / 255.0;
-        let a = vertex_bytes[clr_off + 3] as f32 / 255.0;
+        };
+        let (r, g, b, a) = if has_color_arr {
+            let clr_idx = read_index(
+                vertex_bytes,
+                attr_base + draw.color_index_offset as usize,
+                draw.color_index_size,
+            )?;
+            let clr_off = clr_base + (clr_idx as usize) * clr_stride;
+            if clr_off + 4 > vertex_bytes.len() {
+                (
+                    draw.mat_color[0],
+                    draw.mat_color[1],
+                    draw.mat_color[2],
+                    draw.mat_color[3],
+                )
+            } else {
+                (
+                    vertex_bytes[clr_off] as f32 / 255.0,
+                    vertex_bytes[clr_off + 1] as f32 / 255.0,
+                    vertex_bytes[clr_off + 2] as f32 / 255.0,
+                    vertex_bytes[clr_off + 3] as f32 / 255.0,
+                )
+            }
+        } else {
+            (
+                draw.mat_color[0],
+                draw.mat_color[1],
+                draw.mat_color[2],
+                draw.mat_color[3],
+            )
+        };
         output_indices.push(output_vertices.len() as u32);
         output_vertices.push(Vertex {
             pos: [px, py, pz],
@@ -1028,24 +1175,24 @@ pub extern "C" fn porpoise_rust_renderer_render(
         state.last_status = "no_gpu";
         return 0;
     }
-    if vertex_buffer.is_null() || vertex_size == 0 {
+    // Allow empty frames: clear-only pass when no vertex data (still present and copy_disp)
+    let vertex_bytes: &[u8] = if vertex_buffer.is_null() || vertex_size == 0 {
         if state.debug_log_enabled {
             append_debug_log(
                 &state.capture_dir,
                 &format!(
-                    "render decline: no_vertex_data draw_cmds={} vb={} ib={}",
+                    "render empty_frame: draw_cmds={} vb={} ib={}",
                     state.draw_commands.len(),
                     vertex_size,
                     index_size
                 ),
             );
         }
-        dump_reason_png(&mut state, "no_vertex_data", [255, 0, 0, 255]);
-        state.last_status = "no_vertex_data";
-        return 0;
-    }
-    // SAFETY: C++ passes valid pointers for this call duration.
-    let vertex_bytes = unsafe { std::slice::from_raw_parts(vertex_buffer, vertex_size as usize) };
+        &[]
+    } else {
+        // SAFETY: C++ passes valid pointers for this call duration.
+        unsafe { std::slice::from_raw_parts(vertex_buffer, vertex_size as usize) }
+    };
     let index_bytes = if index_buffer.is_null() || index_size == 0 {
         &[]
     } else {
@@ -1130,7 +1277,7 @@ pub extern "C" fn porpoise_rust_renderer_render(
             occlusion_query_set: None,
         });
 
-        pass.set_viewport(0.0, 0.0, gpu_width as f32, gpu_height as f32, 0.0, 1.0);
+        // Viewport and scissor are set per draw from the command
 
         // #region agent log
         {
@@ -1152,23 +1299,61 @@ pub extern "C" fn porpoise_rust_renderer_render(
             if state.frame_state.cull_mode == GX_CULL_ALL {
                 continue;
             }
-            let Some(topology) = map_primitive_topology(draw.primitive) else {
+            let Some(mut topology) = map_primitive_topology(draw.primitive) else {
                 continue;
             };
-            let Some((verts, inds)) = expand_draw_vertices(draw, vertex_bytes, index_bytes) else {
+            let Some((verts, mut inds)) = expand_draw_vertices(draw, vertex_bytes, index_bytes) else {
                 continue;
             };
             if verts.is_empty() || inds.is_empty() {
                 continue;
             }
-            let proj = proj_flip_y(&state.frame_state.proj);
-            // GX quads/triangles use CCW front face; only detect for strips.
-            let front_face = match topology {
-                wgpu::PrimitiveTopology::TriangleStrip | wgpu::PrimitiveTopology::LineStrip => {
-                    detect_front_face(&verts, &inds, &draw.model_view, &proj)
+            // LineStrip can fail on some drivers; convert to LineList for reliability
+            let (inds_line, topology_line) = if draw.primitive == GX_LINESTRIP && inds.len() >= 2 {
+                let mut line_list = Vec::with_capacity((inds.len() - 1) * 2);
+                for i in 0..inds.len() - 1 {
+                    line_list.push(inds[i]);
+                    line_list.push(inds[i + 1]);
                 }
-                _ => wgpu::FrontFace::Ccw,
+                (line_list, wgpu::PrimitiveTopology::LineList)
+            } else {
+                (inds.clone(), topology)
             };
+            // Expand LineList to thin quads (TriangleList) for reliable visibility on all backends
+            let (verts, inds, topology_final) = if topology_line == wgpu::PrimitiveTopology::LineList {
+                if let Some((q_v, q_i)) = expand_lines_to_quads(&verts, &inds_line) {
+                    (q_v, q_i, wgpu::PrimitiveTopology::TriangleList)
+                } else {
+                    (verts.clone(), inds_line, topology_line)
+                }
+            } else {
+                (verts.clone(), inds_line, topology_line)
+            };
+            // Per-draw viewport and scissor (cul-viewport needs correct viewport for early draws)
+            if draw.viewport_width > 0.0 && draw.viewport_height > 0.0 {
+                pass.set_viewport(
+                    draw.viewport_left,
+                    draw.viewport_top,
+                    draw.viewport_width,
+                    draw.viewport_height,
+                    draw.viewport_near,
+                    draw.viewport_far,
+                );
+            } else {
+                pass.set_viewport(0.0, 0.0, gpu_width as f32, gpu_height as f32, 0.0, 1.0);
+            }
+            if draw.scissor_wd > 0 && draw.scissor_ht > 0 {
+                pass.set_scissor_rect(
+                    draw.scissor_left,
+                    draw.scissor_top,
+                    draw.scissor_wd,
+                    draw.scissor_ht,
+                );
+            }
+            // Per-draw projection (cul-viewport: ortho for rects, perspective for spheres)
+            let proj = draw.proj;
+            // GX front = CW (gx.pdf §4.4.3).
+            let front_face = wgpu::FrontFace::Cw;
             if !state.logged_draw_debug {
                 let sample = verts[0];
                 let world = mul_mat4_vec4_col_major(
@@ -1176,9 +1361,9 @@ pub extern "C" fn porpoise_rust_renderer_render(
                     [sample.pos[0], sample.pos[1], sample.pos[2], 1.0],
                 );
                 let mut clip = mul_mat4_vec4_col_major(&proj, world);
-                clip[2] = clip[2] + clip[3]; // mirrored Z: 0=near, 1=far (matches shader)
+                clip[2] = clip[2] + clip[3];
                 let ndc = if clip[3].abs() > f32::EPSILON {
-                    [clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]] // Y flip in proj
+                    [clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]]
                 } else {
                     [0.0, 0.0, 0.0]
                 };
@@ -1191,10 +1376,10 @@ pub extern "C" fn porpoise_rust_renderer_render(
                         [vtx.pos[0], vtx.pos[1], vtx.pos[2], 1.0],
                     );
                     let mut c = mul_mat4_vec4_col_major(&proj, w);
-                    c[2] = c[2] + c[3]; // mirrored Z (matches shader)
+                    c[2] = c[2] + c[3];
                     if c[3].abs() > f32::EPSILON {
                         let x = c[0] / c[3];
-                        let y = c[1] / c[3]; // Y flip in proj
+                        let y = c[1] / c[3];
                         let z = c[2] / c[3];
                         if (-1.0..=1.0).contains(&x) && (-1.0..=1.0).contains(&y) && (0.0..=1.0).contains(&z) {
                             in_ndc += 1;
@@ -1239,7 +1424,7 @@ pub extern "C" fn porpoise_rust_renderer_render(
                             "\"ndc_current\":[{:.3},{:.3},{:.3}],",
                             "\"ndc_gx_depth_z\":{:.3},",
                             "\"in_ndc_sample\":{}/{},",
-                            "\"cull_mode\":{},\"front_face_cw\":false}}}}\n"
+                            "\"cull_mode\":{},\"front_face\":\"ccw\"}}}}\n"
                         ),
                         ts,
                         sample.pos[0], sample.pos[1], sample.pos[2],
@@ -1257,7 +1442,7 @@ pub extern "C" fn porpoise_rust_renderer_render(
                 // #endregion
                 state.logged_draw_debug = true;
             }
-            let key = encode_pipeline_key_with_front_face(&state.frame_state, topology, front_face);
+            let key = encode_pipeline_key_with_front_face(&state.frame_state, topology_final, front_face);
             let pipeline = if let Some(p) = pipeline_cache.get(&key) {
                 p
             } else {
@@ -1268,7 +1453,7 @@ pub extern "C" fn porpoise_rust_renderer_render(
                     &vertex_layout,
                     surface_format,
                     &state.frame_state,
-                    topology,
+                    topology_final,
                     front_face,
                 );
                 pipeline_cache.insert(key, p);
@@ -1425,6 +1610,8 @@ pub extern "C" fn porpoise_rust_renderer_render(
 #[no_mangle]
 pub extern "C" fn porpoise_rust_renderer_copy_disp(
     dest: *mut core::ffi::c_void,
+    copy_left: u16,
+    copy_top: u16,
     width: u16,
     height: u16,
     _clear: u8,
@@ -1437,14 +1624,16 @@ pub extern "C" fn porpoise_rust_renderer_copy_disp(
         state.last_status = "copy_disp_no_dest";
         return 0;
     }
+    let left = copy_left as u32;
+    let top = copy_top as u32;
     let w = width as u32;
     let h = height as u32;
     let Some(rgba) = read_color_rgba8(
         &state.cached_rgba,
         state.cached_width,
         state.cached_height,
-        0,
-        0,
+        left,
+        top,
         w,
         h,
     ) else {

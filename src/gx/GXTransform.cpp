@@ -110,16 +110,35 @@ void GXLoadTexMtxImm(const void* mtx_, u32 id, GXTexMtxType type) {
 // TODO GXProject
 
 void GXSetViewport(float left, float top, float width, float height, float nearZ, float farZ) {
+    g_gxState.viewportLeft = left;
+    g_gxState.viewportTop = top;
+    g_gxState.viewportWidth = width;
+    g_gxState.viewportHeight = height;
+    g_gxState.viewportNear = nearZ;
+    g_gxState.viewportFar = farZ;
     porpoise::gfx::set_viewport(left, top, width, height, nearZ, farZ);
     notify_transform_state();
 }
 
 void GXSetViewportJitter(float left, float top, float width, float height, float nearZ, float farZ, u32 field) {
+    (void)field;
+    g_gxState.viewportLeft = left;
+    g_gxState.viewportTop = top;
+    g_gxState.viewportWidth = width;
+    g_gxState.viewportHeight = height;
+    g_gxState.viewportNear = nearZ;
+    g_gxState.viewportFar = farZ;
     porpoise::gfx::set_viewport(left, top, width, height, nearZ, farZ);
     notify_transform_state();
 }
 
 // TODO GXSetZScaleOffset
-// TODO GXSetScissorBoxOffset
+
+void GXSetScissorBoxOffset(s32 x_off, s32 y_off) {
+  (void)x_off;
+  (void)y_off;
+  /* Stub: offset applied to scissor box in hardware; not yet applied in render path. */
+}
+
 // TODO GXSetClipMode
 }

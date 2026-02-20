@@ -29,5 +29,17 @@ void set_viewport(float left, float top, float width, float height, float nearZ,
   glDepthRange(static_cast<GLclampd>(nearZ), static_cast<GLclampd>(farZ));
 }
 
+void set_scissor(u32 left, u32 top, u32 wd, u32 ht) {
+  if (wd == 0 || ht == 0) {
+    glDisable(GL_SCISSOR_TEST);
+    return;
+  }
+  const auto windowSize = porpoise::window::get_window_size();
+  const GLint x = static_cast<GLint>(left);
+  const GLint y = static_cast<GLint>(windowSize.fb_height - top - ht);
+  glScissor(x, y, static_cast<GLsizei>(wd), static_cast<GLsizei>(ht));
+  glEnable(GL_SCISSOR_TEST);
+}
+
 } // namespace porpoise::gfx
 

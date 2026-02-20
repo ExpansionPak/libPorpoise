@@ -65,3 +65,16 @@ add_executable(onetri_dl_demo ${CMAKE_SOURCE_DIR}/demos/gxdemo/src/Simple/smp-on
 target_link_libraries(onetri_dl_demo porpoise)
 target_include_directories(onetri_dl_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+# GX culling/viewport demo (uses GXSetScissor for draggable clip window)
+add_executable(cul_viewport_demo
+  ${CMAKE_SOURCE_DIR}/demos/gxdemo/src/Culling/cul-viewport.c
+  ${CMAKE_SOURCE_DIR}/demos/gxdemo/src/PixelProc/cmn-model.c
+)
+target_link_libraries(cul_viewport_demo porpoise)
+target_include_directories(cul_viewport_demo PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/demos/gxdemo/include)
+
+# GX framebuffer full-frame AA demo (uses GXSetScissor for interlaced half-screen)
+add_executable(frb_aa_full_demo ${CMAKE_SOURCE_DIR}/demos/gxdemo/src/Framebuffer/frb-aa-full.c)
+target_link_libraries(frb_aa_full_demo porpoise)
+target_include_directories(frb_aa_full_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
+

@@ -6,7 +6,7 @@
 #include "window.hpp"
 #include <dolphin/os.h>  // For OSReport
 #include <dolphin/vi.h>  // For VIMakeContextCurrent
-#include <dolphin/vi.h>  // For VIMakeContextCurrent
+#include <cstdlib>
 
 // OpenGL includes
 #ifdef _WIN32
@@ -287,11 +287,14 @@ void render() {
 
   // Bridge-first path: if Rust backend reports the frame as handled, skip
   // legacy OpenGL execution for this frame.
-  if (bridge::render(g_vertexBuffer, g_indexBuffer, g_gxState)) {
+  // Set PORPOISE_FORCE_OPENGL=1 to use OpenGL even when Rust bridge is loaded (e.g. if only blue screen).
+  const bool forceOpenGL = (std::getenv("PORPOISE_FORCE_OPENGL") != nullptr);
+  if (!forceOpenGL && bridge::render(g_vertexBuffer, g_indexBuffer, g_gxState)) {
     g_lastFrameByBridge = true;
     g_rendered_this_frame = true;
     return;
   }
+  g_lastFrameByBridge = false;
 
 #ifdef PORPOISE_RUST_BRIDGE_ONLY
   static int bridgeDeclineLogs = 0;
@@ -305,26 +308,15 @@ void render() {
   // Ensure OpenGL context is current before rendering
   VIMakeContextCurrent();
   
-  // Note: We assume we're rendering to the default framebuffer (0)
-  // If we were using FBOs, we'd need to check GL_FRAMEBUFFER_BINDING
-  // but that requires OpenGL 3.0+ and proper headers
-  
-  // Check if we have draw commands
-  if (g_drawCommands.empty()) {
-    return;
-  }
-  
-  // Ensure we have a valid OpenGL context
   // Set up a default viewport if not set
   GLint viewport[4];
   glGetIntegerv(GL_VIEWPORT, viewport);
   if (viewport[2] == 0 || viewport[3] == 0) {
-    // Viewport not set, use window size
     const auto windowSize = porpoise::window::get_window_size();
     glViewport(0, 0, static_cast<GLsizei>(windowSize.fb_width), static_cast<GLsizei>(windowSize.fb_height));
   }
   
-  // Clear the screen with the clear color
+  // Always clear so we never swap garbage (fixes flashing when draws are skipped or empty)
   glClearColor(
     g_gxState.clearColor.x(),
     g_gxState.clearColor.y(),
@@ -332,6 +324,11 @@ void render() {
     g_gxState.clearColor.w()
   );
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  
+  if (g_drawCommands.empty()) {
+    g_rendered_this_frame = true;
+    return;
+  }
   
   // Initialize VBOs if needed
   init_vbos();
@@ -350,6 +347,7 @@ void render() {
   
   // Set up OpenGL state
   setup_gl_state();
+  // Viewport and scissor are applied per draw from cmd
   
   // Enable fixed-function pipeline
   // Temporarily disable depth test and culling to see if geometry is being drawn
@@ -363,34 +361,7 @@ void render() {
     OSReport("[render] OpenGL error before setup: 0x%x\n", err);
   }
   
-  // Set up projection matrix
-  glMatrixMode(GL_PROJECTION);
-  glLoadIdentity(); // Start with identity
-  // Always set the projection matrix (even if it's identity, it might be valid)
-  set_gl_matrix(g_gxState.proj);
-  
-  // Check for OpenGL errors after matrix setup
-  err = glGetError();
-  if (err != GL_NO_ERROR) {
-    // Silently ignore errors - they might be from previous frames
-  }
-  
-  // Set up modelview matrix (use current PnMtx)
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity(); // Start with identity
-  const auto& pnMtx = g_gxState.pnMtx[g_gxState.currentPnMtx];
-  // Convert Mat3x4 to Mat4x4 for OpenGL
-  porpoise::Mat4x4<float> modelView{};
-  for (int row = 0; row < 3; ++row) {
-    for (int col = 0; col < 4; ++col) {
-      modelView(row, col) = pnMtx.pos(row, col);
-    }
-  }
-  modelView(3, 0) = 0.0f;
-  modelView(3, 1) = 0.0f;
-  modelView(3, 2) = 0.0f;
-  modelView(3, 3) = 1.0f;
-  set_gl_matrix(modelView);
+  // Projection and modelview are set per draw from cmd.proj and cmd.modelView
   
   // Process each draw command
   for (const auto& cmd : g_drawCommands) {
@@ -400,6 +371,25 @@ void render() {
     if (cmd.vertRange.offset + cmd.vertRange.size > g_vertexBuffer.size()) {
       continue; // Invalid range, skip this command
     }
+    
+    // Use this draw's projection and modelview (recorded at GXEnd)
+    glMatrixMode(GL_PROJECTION);
+    glLoadMatrixf(cmd.proj);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadMatrixf(cmd.modelView);
+    // Apply viewport and scissor that were current when this draw was recorded
+    if (cmd.viewportWidth > 0.f && cmd.viewportHeight > 0.f) {
+      porpoise::gfx::set_viewport(cmd.viewportLeft, cmd.viewportTop,
+        cmd.viewportWidth, cmd.viewportHeight, cmd.viewportNear, cmd.viewportFar);
+    }
+    if (cmd.scissorWd > 0 && cmd.scissorHt > 0) {
+      porpoise::gfx::set_scissor(cmd.scissorLeft, cmd.scissorTop, cmd.scissorWd, cmd.scissorHt);
+      glEnable(GL_SCISSOR_TEST);
+    } else {
+      glDisable(GL_SCISSOR_TEST);
+    }
+    // Current color for position-only draws (no color array)
+    glColor4f(cmd.matColor[0], cmd.matColor[1], cmd.matColor[2], cmd.matColor[3]);
     
     // Check if we have indexed attributes that need expansion
     bool hasIndexedAttrs = false;
@@ -770,6 +760,18 @@ void render() {
       continue; // Skip the normal rendering path below
     }
     
+    // Direct draws (indexedStride == 0): use per-draw layout from command, not current vtxDesc.
+    // vtxDesc is global and gets overwritten by later draws in the same frame.
+    if (cmd.indexedStride == 0) {
+      const u32 posStride = cmd.posArrayStride > 0 ? cmd.posArrayStride : 12u;
+      const u32 clrStride = cmd.colorArrayStride;
+      vertexStride = posStride + clrStride;
+      hasPosition = (posStride >= 12);
+      hasColor = (clrStride >= 4);
+      posOffset = 0;
+      colorOffset = posStride;
+    }
+    
     // Set up vertex pointers
     if (glBindBuffer && g_vertexVBO != 0) {
       // Using VBOs - pointer is an offset from the start of the VBO
@@ -851,6 +853,12 @@ void render() {
 
 void flush_render_if_pending() {
   if (!g_rendered_this_frame && !g_drawCommands.empty()) {
+    render();
+  }
+}
+
+void render_before_copy() {
+  if (!g_drawCommands.empty()) {
     render();
   }
 }

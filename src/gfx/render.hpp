@@ -35,6 +35,13 @@ struct DrawData {
   // GX state at time of draw
   u32 dstAlpha = UINT32_MAX;
   float modelView[16]{};
+  float proj[16]{};
+  // Viewport and scissor at record time (so early draws use correct viewport)
+  float viewportLeft = 0.f, viewportTop = 0.f, viewportWidth = 0.f, viewportHeight = 0.f;
+  float viewportNear = 0.f, viewportFar = 1.f;
+  u32 scissorLeft = 0, scissorTop = 0, scissorWd = 0, scissorHt = 0;
+  // Material color for position-only draws (GX_COLOR0 mat at record time)
+  float matColor[4]{1.f, 1.f, 1.f, 1.f};
 };
 
 // Push vertex data to staging buffer, returns range
@@ -52,6 +59,10 @@ bool did_render_with_bridge();
 
 // Flush pending draws if any (for apps that call GXDrawDone without DEMODoneRender)
 void flush_render_if_pending();
+
+// Render if there are queued draws (for frb_aa_full: render before each GXCopyDisp)
+// Allows multiple renders per frame for apps that don't use DEMODoneRender
+void render_before_copy();
 
 // Clear all queued commands (called at start of frame)
 void begin_frame();
