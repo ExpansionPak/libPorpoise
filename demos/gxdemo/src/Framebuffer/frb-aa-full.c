@@ -59,7 +59,19 @@
 
 
 #define OCT_DEPTH_MIN  1 // min octahedron recursion depth
-#define OCT_DEPTH_MAX  6 // max octahedron recursion depth
+#define OCT_DEPTH_MAX  4 // max (5+ is very heavy on PC; 4 = 8*4^4 = 2048 draws/half-frame)
+
+/* FULL-FRAME AA ON PC (TODO): The original loop does 3 GXCopyDisp per frame (top half,
+ * bottom half, CopyBottom). Each GXCopyDisp triggers a full render + present in the
+ * wgpu bridge. Presenting more than once per frame is invalid and causes black screen
+ * and/or crash. A proper fix would be in the lib: acquire the swap image once per frame,
+ * reuse it for all 3 passes with LoadOp::Load after the first, and present once from
+ * GXDrawDone. That was attempted but led to black screen/crash (likely timing or
+ * borrow/lifetime); reverted. Until then, on PC we use single-pass (one draw, one copy,
+ * one present per frame) via PORPOISE_FRB_AA_SINGLE_PASS below. */
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
+#define PORPOISE_FRB_AA_SINGLE_PASS 1
+#endif
 
 // The viewing frustum parameters
 #define PROJ_RIGHT   0.050F
@@ -95,7 +107,7 @@ static u8  animMode = 1;  // whether animation is going or stopped
 static u8  drawMode = 0;  // which pattern to draw
 static u8  aaMode   = 0;  // which filters to use
 
-static u32 octDepth = 3;
+static u32 octDepth = 2;  // start light (R trigger to increase); 2 = 128 draws per half-frame
 
 // The following items are necessary for full-frame AA mode
 
@@ -183,8 +195,18 @@ void main ( void )
         GXSetViewport(0.0F, 0.0F,
                       (f32)rMode->fbWidth, (f32)rMode->xfbHeight, 
                       0.0F, 1.0F);
-        
 
+#if defined(PORPOISE_FRB_AA_SINGLE_PASS)
+        {
+            Mtx44 pSingle;
+            MTXFrustum(pSingle, PROJ_TOP, -PROJ_TOP, -PROJ_RIGHT, PROJ_RIGHT, PROJ_ZNEAR, PROJ_ZFAR);
+            GXSetProjection(pSingle, GX_PERSPECTIVE);
+            GXSetScissor(0, 0, rMode->fbWidth, rMode->efbHeight);
+            GXSetScissorBoxOffset(0, 0);
+        }
+        DrawTick(v);
+        GXCopyDisp(DEMOGetCurrentBuffer(), GX_TRUE);
+#else
         // Draw the top half of the screen
 #if (GX_REV == 1)
         // (code for rev. A Flipper)
@@ -224,13 +246,18 @@ void main ( void )
 
         // Copy out (and clear) the bottom half
         CopyBottom();
+#endif
 
         // Wait for retrace and swap buffers.
         GXDrawDone();
         DEMOSwapBuffers();
 
+#if defined(PORPOISE_FRB_AA_SINGLE_PASS)
+        OSSleepMilliseconds(16);
+#endif
+
         DEMOPadRead();
-        AnimTick();         // Update animation.
+        AnimTick();
     }
 
     OSHalt("End of test");
