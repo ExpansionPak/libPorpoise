@@ -11,6 +11,9 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #else
 #include <unistd.h>
 #endif
@@ -146,8 +149,15 @@ u32 PPCMfdec(void) {
   Sync functions
  *---------------------------------------------------------------------------*/
 void PPCSync(void) {
-    /* On PC, memory barriers are handled by the compiler/CPU automatically */
-    /* This is a no-op for compatibility */
+    /* Approximate PPC "sync" with a full host memory fence. */
+    #if defined(_MSC_VER)
+    _ReadWriteBarrier();
+    MemoryBarrier();
+    #elif defined(__GNUC__) || defined(__clang__)
+    __sync_synchronize();
+    #else
+    /* Fallback: keep API behavior if no barrier primitive is available. */
+    #endif
 }
 
 void PPCEieio(void) {
