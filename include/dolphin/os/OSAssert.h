@@ -14,6 +14,9 @@
 extern "C" {
 #endif
 
+/* Declared here so ASSERT/ASSERTMSG/OSHalt are usable with OSAssert.h alone. */
+void OSPanic(const char* file, int line, const char* fmt, ...);
+
 /*---------------------------------------------------------------------------*
     Assertion Macros
  *---------------------------------------------------------------------------*/

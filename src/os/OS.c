@@ -12,9 +12,18 @@
 #include <fcntl.h>
 #endif
 
+#if defined(_MSC_VER)
+#define OS_THREAD_LOCAL __declspec(thread)
+#elif defined(__GNUC__) || defined(__clang__)
+#define OS_THREAD_LOCAL __thread
+#else
+#define OS_THREAD_LOCAL _Thread_local
+#endif
+
 static BOOL s_osInitialized = FALSE;
 static BOOL s_osReportInitialized = FALSE;
-static BOOL s_osReportInProgress = FALSE;  // Guard against recursion
+/* Per-thread guard against recursive OSReport calls. */
+static OS_THREAD_LOCAL BOOL s_osReportInProgress = FALSE;
 #ifdef _WIN32
 static BOOL s_consoleAttached = FALSE;
 
