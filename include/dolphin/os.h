@@ -12,6 +12,7 @@
 #include "dolphin/os/OSMessage.h"
 #include "dolphin/os/OSFastCast.h"
 #include "dolphin/os/OSAlloc.h"
+#include "dolphin/os/OSStopwatch.h"
 #include "dolphin/os/OSCache.h"
 #include "dolphin/os/OSError.h"
 #include "dolphin/os/OSFont.h"
