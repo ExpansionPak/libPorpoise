@@ -30,6 +30,9 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #else
 #include <unistd.h>
 #endif
@@ -49,11 +52,16 @@ static OSContext* s_currentContext = NULL;
   Returns:      Stack pointer (stub: returns 0 on PC)
  *---------------------------------------------------------------------------*/
 u32 OSGetStackPointer(void) {
-    /* On PC, each platform thread has its own stack managed by the OS.
-     * We can't easily get the stack pointer from C code in a meaningful way.
-     * Games rarely use this anyway - it's mainly for debugging.
+    /* Best-effort PC approximation.
+     * Not exact PPC r1 semantics, but suitable for diagnostics.
      */
+#if defined(_MSC_VER)
+    return (u32)(uintptr_t)_AddressOfReturnAddress();
+#elif defined(__GNUC__) || defined(__clang__)
+    return (u32)(uintptr_t)__builtin_frame_address(0);
+#else
     return 0;
+#endif
 }
 
 /*---------------------------------------------------------------------------*
