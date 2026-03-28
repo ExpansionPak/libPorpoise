@@ -23,19 +23,21 @@ typedef struct OSCalendarTime {
     int usec;
 } OSCalendarTime;
 
-#define OS_TIMER_CLOCK      40500000  // 40.5 MHz
+#define OS_TIMER_CLOCK      40500000  // 40.5 MHz (bus / 4)
 #define OS_BUS_CLOCK        162000000 // 162 MHz
+#define OS_CORE_CLOCK       486000000 // 486 MHz
 
 // Time conversion macros
 #define OSSecondsToTicks(sec)           ((OSTime)(sec) * OS_TIMER_CLOCK)
 #define OSMillisecondsToTicks(msec)     ((OSTime)(msec) * (OS_TIMER_CLOCK / 1000))
 #define OSMicrosecondsToTicks(usec)     ((OSTime)(usec) * (OS_TIMER_CLOCK / 1000000))
-#define OSNanosecondsToTicks(nsec)      (((OSTime)(nsec) * (OS_TIMER_CLOCK / 1000000)) / 1000)
+#define OSNanosecondsToTicks(nsec)      ((OSTime)(nsec) / (1000000000 / OS_TIMER_CLOCK))
 
+#define OSTicksToCycles(ticks)          ((OSTime)(ticks) * (OS_CORE_CLOCK / OS_TIMER_CLOCK))
 #define OSTicksToSeconds(ticks)         ((ticks) / OS_TIMER_CLOCK)
 #define OSTicksToMilliseconds(ticks)    ((ticks) / (OS_TIMER_CLOCK / 1000))
 #define OSTicksToMicroseconds(ticks)    ((ticks) / (OS_TIMER_CLOCK / 1000000))
-#define OSTicksToNanoseconds(ticks)     (((ticks) * 1000) / (OS_TIMER_CLOCK / 1000000))
+#define OSTicksToNanoseconds(ticks)     ((OSTime)(ticks) * (1000000000 / OS_TIMER_CLOCK))
 
 OSTime OSGetTime(void);
 OSTick OSGetTick(void);
