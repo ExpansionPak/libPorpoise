@@ -95,6 +95,16 @@ static OSThread s_mainThread;  /* Represents the main/initial thread */
 static OSThread* s_currentThread = &s_idleThread;
 static OSSwitchThreadCallback s_switchCallback = NULL;
 
+/* Per-platform-thread current OSThread pointer. */
+#if defined(_MSC_VER)
+#define PORPOISE_THREAD_LOCAL __declspec(thread)
+#elif defined(__GNUC__) || defined(__clang__)
+#define PORPOISE_THREAD_LOCAL __thread
+#else
+#define PORPOISE_THREAD_LOCAL
+#endif
+static PORPOISE_THREAD_LOCAL OSThread* s_tlsCurrentThread = NULL;
+
 /* Thread wrapper function */
 #ifdef _WIN32
 static DWORD WINAPI ThreadWrapper(LPVOID param) {
@@ -104,6 +114,7 @@ static DWORD WINAPI ThreadWrapper(LPVOID param) {
     
     /* Set this thread as current for this platform thread */
     s_currentThread = thread;
+    s_tlsCurrentThread = thread;
     thread->state = OS_THREAD_STATE_RUNNING;
     
     if (platform && platform->func) {
@@ -122,6 +133,7 @@ static void* ThreadWrapper(void* param) {
     
     /* Set this thread as current for this platform thread */
     s_currentThread = thread;
+    s_tlsCurrentThread = thread;
     thread->state = OS_THREAD_STATE_RUNNING;
     
     if (platform && platform->func) {
@@ -157,6 +169,7 @@ void __OSThreadInit(void) {
     s_mainThread.queueMutex.head = NULL;
     s_mainThread.queueMutex.tail = NULL;
     s_currentThread = &s_mainThread;
+    s_tlsCurrentThread = &s_mainThread;
 }
 
 /*---------------------------------------------------------------------------*
@@ -188,12 +201,7 @@ void OSInitThreadQueue(OSThreadQueue* queue) {
   Returns:      Pointer to current OSThread structure
  *---------------------------------------------------------------------------*/
 OSThread* OSGetCurrentThread(void) {
-    /* Note: On a real multi-threaded PC port, this should be thread-local.
-     * For now, we return the global which works for simple cases.
-     * 
-     * TODO: Use __thread (GCC) or __declspec(thread) (MSVC) for true TLS
-     */
-    return s_currentThread;
+    return s_tlsCurrentThread ? s_tlsCurrentThread : s_currentThread;
 }
 
 /*---------------------------------------------------------------------------*
