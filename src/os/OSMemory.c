@@ -158,6 +158,18 @@ static ProtectionChannel s_protectionChannels[4] = {0};
 #endif
 
 /*---------------------------------------------------------------------------*
+  Name:         OSGetPhysicalMemSize
+
+  Description:  Legacy API for GameCube-era code. Returns MEM1 physical size.
+                This maps to OSGetPhysicalMem1Size() on Wii-era systems.
+
+  Returns:      Physical MEM1 size in bytes
+ *---------------------------------------------------------------------------*/
+u32 OSGetPhysicalMemSize(void) {
+    return OSGetPhysicalMem1Size();
+}
+
+/*---------------------------------------------------------------------------*
   Name:         OSGetPhysicalMem1Size
 
   Description:  Returns the size of MEM1 (main memory).
@@ -202,6 +214,18 @@ u32 OSGetPhysicalMem2Size(void) {
      * If you want GameCube mode, return 0 here.
      */
     return MEM2_SIZE;
+}
+
+/*---------------------------------------------------------------------------*
+  Name:         OSGetConsoleSimulatedMemSize
+
+  Description:  Legacy API for GameCube-era code. Returns simulated MEM1 size.
+                This maps to OSGetConsoleSimulatedMem1Size() on Wii-era systems.
+
+  Returns:      Simulated MEM1 size in bytes
+ *---------------------------------------------------------------------------*/
+u32 OSGetConsoleSimulatedMemSize(void) {
+    return OSGetConsoleSimulatedMem1Size();
 }
 
 /*---------------------------------------------------------------------------*

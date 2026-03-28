@@ -8,13 +8,13 @@ extern "C" {
 #endif
 
 /* Memory size APIs */
+u32 OSGetPhysicalMemSize(void);
+u32 OSGetConsoleSimulatedMemSize(void);
+
 u32 OSGetPhysicalMem1Size(void);
 u32 OSGetPhysicalMem2Size(void);
 u32 OSGetConsoleSimulatedMem1Size(void);
 u32 OSGetConsoleSimulatedMem2Size(void);
-
-#define OSGetPhysicalMemSize            OSGetPhysicalMem1Size
-#define OSGetConsoleSimulatedMemSize    OSGetConsoleSimulatedMem1Size
 
 /* Memory protection APIs */
 #define OS_PROTECT_CHAN0            0
