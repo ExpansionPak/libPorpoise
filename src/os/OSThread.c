@@ -697,6 +697,53 @@ void OSSetThreadSpecific(s32 index, void* ptr) {
     }
 }
 
+typedef struct OSIdleThreadArgs {
+    OSIdleFunction func;
+    void* param;
+} OSIdleThreadArgs;
+
+static OSIdleThreadArgs s_idleArgs = {NULL, NULL};
+
+static void* IdleThreadEntry(void* arg) {
+    OSIdleThreadArgs* idleArgs = (OSIdleThreadArgs*)arg;
+    if (idleArgs && idleArgs->func) {
+        idleArgs->func(idleArgs->param);
+    }
+    return NULL;
+}
+
+static BOOL IsIdleThreadActive(void) {
+    return (s_idleThread.state != 0 &&
+            s_idleThread.state != OS_THREAD_STATE_MORIBUND &&
+            !PLATFORM_PTR_IS_NULL(&s_idleThread.context));
+}
+
+static void CleanupIdleThreadIfFinished(void) {
+    if (s_idleThread.state != OS_THREAD_STATE_MORIBUND ||
+        PLATFORM_PTR_IS_NULL(&s_idleThread.context)) {
+        return;
+    }
+
+    PlatformThread* platform = (PlatformThread*)PLATFORM_PTR_LOAD(&s_idleThread.context);
+    if (platform) {
+#ifdef _WIN32
+        if (platform->handle) {
+            WaitForSingleObject(platform->handle, INFINITE);
+            CloseHandle(platform->handle);
+            platform->handle = NULL;
+        }
+#else
+        if (platform->handle) {
+            pthread_join(platform->handle, NULL);
+        }
+#endif
+        free(platform);
+    }
+
+    PLATFORM_PTR_CLEAR(&s_idleThread.context);
+    memset(&s_idleThread, 0, sizeof(s_idleThread));
+}
+
 /*---------------------------------------------------------------------------*
   Name:         OSSetIdleFunction / OSGetIdleFunction
 
@@ -714,19 +761,55 @@ void OSSetThreadSpecific(s32 index, void* ptr) {
  *---------------------------------------------------------------------------*/
 OSThread* OSSetIdleFunction(OSIdleFunction idleFunction, void* param, 
                             void* stack, u32 stackSize) {
-    /* Original hardware: Idle function runs in special idle thread when
-     * no other threads are runnable.
-     * 
-     * PC: OS scheduler handles idle. This is a stub.
-     */
-    (void)idleFunction;
-    (void)param;
-    (void)stack;
-    (void)stackSize;
+    CleanupIdleThreadIfFinished();
+
+    /* Passing NULL cancels any currently active idle function. */
+    if (!idleFunction) {
+        if (IsIdleThreadActive()) {
+            OSCancelThread(&s_idleThread);
+        }
+        CleanupIdleThreadIfFinished();
+        s_idleArgs.func = NULL;
+        s_idleArgs.param = NULL;
+        return NULL;
+    }
+
+    /* If an idle thread is still active, fail like SDK behavior. */
+    if (IsIdleThreadActive()) {
+        return NULL;
+    }
+
+    if (!stack || stackSize < sizeof(u32)) {
+        return NULL;
+    }
+
+    s_idleArgs.func = idleFunction;
+    s_idleArgs.param = param;
+
+    if (!OSCreateThread(&s_idleThread, IdleThreadEntry, &s_idleArgs, stack,
+                        stackSize, OS_PRIORITY_IDLE, 0)) {
+        s_idleArgs.func = NULL;
+        s_idleArgs.param = NULL;
+        return NULL;
+    }
+
+    OSResumeThread(&s_idleThread);
+    if (s_idleThread.state != OS_THREAD_STATE_RUNNING) {
+        OSCancelThread(&s_idleThread);
+        CleanupIdleThreadIfFinished();
+        s_idleArgs.func = NULL;
+        s_idleArgs.param = NULL;
+        return NULL;
+    }
+
     return &s_idleThread;
 }
 
 OSThread* OSGetIdleFunction(void) {
+    CleanupIdleThreadIfFinished();
+    if (!IsIdleThreadActive()) {
+        return NULL;
+    }
     return &s_idleThread;
 }
 
