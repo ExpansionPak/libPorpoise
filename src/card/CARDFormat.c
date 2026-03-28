@@ -5,6 +5,7 @@
 #include <dolphin/card.h>
 #include <dolphin/card_internal.h>
 #include <dolphin/os.h>
+#include <dolphin/porpoise/Guard.h>
 
 /*---------------------------------------------------------------------------*
   Name:         CARDFormatAsync
@@ -17,9 +18,7 @@
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDFormatAsync(s32 chan, CARDCallback callback) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
     
     if (!CARDProbe(chan)) {
         return CARD_RESULT_NOCARD;

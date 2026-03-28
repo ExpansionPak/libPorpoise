@@ -4,6 +4,7 @@
 
 #include <dolphin/card.h>
 #include <dolphin/card_internal.h>
+#include <dolphin/porpoise/Guard.h>
 #include <string.h>
 
 /*---------------------------------------------------------------------------*
@@ -18,12 +19,10 @@
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDGetStatus(s32 chan, s32 fileNo, CARDStat* stat) {
-    (void)chan;
-    (void)fileNo;
-    
-    if (stat) {
-        memset(stat, 0, sizeof(CARDStat));
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
+    PP_GUARD_RET(fileNo >= 0 && fileNo < 127, CARD_RESULT_FATAL_ERROR, "invalid file number");
+    PP_GUARD_PTR_RET(stat, CARD_RESULT_FATAL_ERROR);
+    memset(stat, 0, sizeof(CARDStat));
     
     return CARD_RESULT_READY;
 }
@@ -40,9 +39,9 @@ s32 CARDGetStatus(s32 chan, s32 fileNo, CARDStat* stat) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDSetStatus(s32 chan, s32 fileNo, CARDStat* stat) {
-    (void)chan;
-    (void)fileNo;
-    (void)stat;
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
+    PP_GUARD_RET(fileNo >= 0 && fileNo < 127, CARD_RESULT_FATAL_ERROR, "invalid file number");
+    PP_GUARD_PTR_RET(stat, CARD_RESULT_FATAL_ERROR);
     
     return CARD_RESULT_READY;
 }
@@ -59,12 +58,10 @@ s32 CARDSetStatus(s32 chan, s32 fileNo, CARDStat* stat) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDGetStatusEx(s32 chan, const CARDFileInfo* fileInfo, CARDStat* stat) {
-    (void)chan;
-    (void)fileInfo;
-    
-    if (stat) {
-        memset(stat, 0, sizeof(CARDStat));
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
+    PP_GUARD_PTR_RET(fileInfo, CARD_RESULT_FATAL_ERROR);
+    PP_GUARD_PTR_RET(stat, CARD_RESULT_FATAL_ERROR);
+    memset(stat, 0, sizeof(CARDStat));
     
     return CARD_RESULT_READY;
 }
@@ -81,9 +78,9 @@ s32 CARDGetStatusEx(s32 chan, const CARDFileInfo* fileInfo, CARDStat* stat) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDSetStatusEx(s32 chan, CARDFileInfo* fileInfo, CARDStat* stat) {
-    (void)chan;
-    (void)fileInfo;
-    (void)stat;
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
+    PP_GUARD_PTR_RET(fileInfo, CARD_RESULT_FATAL_ERROR);
+    PP_GUARD_PTR_RET(stat, CARD_RESULT_FATAL_ERROR);
     
     return CARD_RESULT_READY;
 }

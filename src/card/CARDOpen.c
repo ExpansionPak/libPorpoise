@@ -5,6 +5,7 @@
 #include <dolphin/card.h>
 #include <dolphin/card_internal.h>
 #include <dolphin/os.h>
+#include <dolphin/porpoise/Guard.h>
 #include <sys/stat.h>
 #include <string.h>
 
@@ -24,9 +25,9 @@
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDOpen(s32 chan, const char* fileName, CARDFileInfo* fileInfo) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN || !fileName || !fileInfo) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
+    PP_GUARD_PTR_RET(fileName, CARD_RESULT_FATAL_ERROR);
+    PP_GUARD_PTR_RET(fileInfo, CARD_RESULT_FATAL_ERROR);
     
     if (!__CARDCards[chan].mounted) {
         return CARD_RESULT_NOCARD;
@@ -80,9 +81,9 @@ s32 CARDOpen(s32 chan, const char* fileName, CARDFileInfo* fileInfo) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDFastOpen(s32 chan, s32 fileNo, CARDFileInfo* fileInfo) {
-    (void)fileNo;
-    
-    if (!fileInfo) return CARD_RESULT_FATAL_ERROR;
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
+    PP_GUARD_RET(fileNo >= 0 && fileNo < 127, CARD_RESULT_FATAL_ERROR, "invalid file number");
+    PP_GUARD_PTR_RET(fileInfo, CARD_RESULT_FATAL_ERROR);
     
     fileInfo->chan = chan;
     fileInfo->fileNo = fileNo;
@@ -102,9 +103,7 @@ s32 CARDFastOpen(s32 chan, s32 fileNo, CARDFileInfo* fileInfo) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDClose(CARDFileInfo* fileInfo) {
-    if (!fileInfo) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_PTR_RET(fileInfo, CARD_RESULT_FATAL_ERROR);
     
     s32 chan = fileInfo->chan;
     s32 fileNo = fileInfo->fileNo;

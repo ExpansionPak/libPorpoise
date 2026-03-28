@@ -7,6 +7,7 @@
 #include <dolphin/card.h>
 #include <dolphin/card_internal.h>
 #include <dolphin/os.h>
+#include <dolphin/porpoise/Guard.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,9 +99,7 @@ void CARDInit(void) {
   Returns:      TRUE if card present
  *---------------------------------------------------------------------------*/
 BOOL CARDProbe(s32 chan) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN) {
-        return FALSE;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, FALSE, "invalid channel");
     
     struct stat st;
     return (stat(__CARDCardPaths[chan], &st) == 0);
@@ -142,9 +141,7 @@ s32 CARDProbeEx(s32 chan, s32* memSize, s32* sectorSize) {
   Returns:      Result code
  *---------------------------------------------------------------------------*/
 s32 CARDGetResultCode(s32 chan) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
     
     return __CARDCards[chan].lastResult;
 }
@@ -161,9 +158,7 @@ s32 CARDGetResultCode(s32 chan) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDFreeBlocks(s32 chan, s32* bytesNotUsed, s32* filesNotUsed) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
     
     if (!__CARDCards[chan].mounted) {
         return CARD_RESULT_NOCARD;
@@ -190,9 +185,7 @@ s32 CARDFreeBlocks(s32 chan, s32* bytesNotUsed, s32* filesNotUsed) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDGetMemSize(s32 chan, u16* size) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
     
     if (!__CARDCards[chan].mounted) {
         return CARD_RESULT_NOCARD;
@@ -216,9 +209,7 @@ s32 CARDGetMemSize(s32 chan, u16* size) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDGetSectorSize(s32 chan, u32* size) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
     
     if (!__CARDCards[chan].mounted) {
         return CARD_RESULT_NOCARD;
@@ -242,9 +233,7 @@ s32 CARDGetSectorSize(s32 chan, u32* size) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDGetEncoding(s32 chan, u16* encode) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
     
     if (!__CARDCards[chan].mounted) {
         return CARD_RESULT_NOCARD;
@@ -268,9 +257,8 @@ s32 CARDGetEncoding(s32 chan, u16* encode) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDSetDiskID(s32 chan, const DVDDiskID* diskID) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN || !diskID) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
+    PP_GUARD_PTR_RET(diskID, CARD_RESULT_FATAL_ERROR);
     
     memcpy(&__CARDCards[chan].diskID, diskID, sizeof(DVDDiskID));
     
@@ -292,6 +280,7 @@ BOOL CARDGetFastMode(void) {
 }
 
 s32 CARDGetCurrentMode(s32 chan, u32* mode) {
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
     if (mode) *mode = 0;
     return CARD_RESULT_READY;
 }
@@ -306,9 +295,7 @@ s32 CARDGetCurrentMode(s32 chan, u32* mode) {
   Returns:      Bytes transferred
  *---------------------------------------------------------------------------*/
 s32 CARDGetXferredBytes(s32 chan) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN) {
-        return 0;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, 0, "invalid channel");
     
     // On PC, all transfers are instant
     return 0;

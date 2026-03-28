@@ -5,6 +5,7 @@
 #include <dolphin/card.h>
 #include <dolphin/card_internal.h>
 #include <dolphin/os.h>
+#include <dolphin/porpoise/Guard.h>
 
 /*---------------------------------------------------------------------------*
   Name:         CARDMountAsync
@@ -20,9 +21,7 @@
  *---------------------------------------------------------------------------*/
 s32 CARDMountAsync(s32 chan, void* workArea, CARDCallback detachCallback,
                    CARDCallback attachCallback) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
     
     if (!CARDProbe(chan)) {
         __CARDCards[chan].lastResult = CARD_RESULT_NOCARD;
@@ -69,9 +68,7 @@ s32 CARDMount(s32 chan, void* workArea, CARDCallback detachCallback) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDUnmount(s32 chan) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
     
     if (!__CARDCards[chan].mounted) {
         return CARD_RESULT_NOCARD;

@@ -63,6 +63,7 @@
 #include <dolphin/pad.h>
 #include <dolphin/PADConfig.h>
 #include <dolphin/os.h>
+#include <dolphin/porpoise/Guard.h>
 #include <string.h>
 #include <stdlib.h>
 #include <SDL.h>
@@ -538,9 +539,7 @@ BOOL PADInit(void) {
   Returns:      Always TRUE
  *---------------------------------------------------------------------------*/
 BOOL PADReset(u32 mask) {
-    if (!s_initialized) {
-        return FALSE;
-    }
+    PP_GUARD_RET(s_initialized, FALSE, "PADInit must be called first");
     
     BOOL enabled = OSDisableInterrupts();
     
@@ -584,9 +583,7 @@ BOOL PADReset(u32 mask) {
   Returns:      Always TRUE
  *---------------------------------------------------------------------------*/
 BOOL PADRecalibrate(u32 mask) {
-    if (!s_initialized) {
-        return FALSE;
-    }
+    PP_GUARD_RET(s_initialized, FALSE, "PADInit must be called first");
     
     // For PC implementation, recalibration just resets the origin.
     // In original hardware, this sends a calibration command to the controller.
@@ -622,14 +619,18 @@ BOOL PADRecalibrate(u32 mask) {
                 (PAD_CHANn_BIT for channels with rumble support)
  *---------------------------------------------------------------------------*/
 u32 PADRead(PADStatus* status) {
-    if (!s_initialized || !status) {
-        // Initialize status array to error state
-        if (status) {
-            for (s32 i = 0; i < PAD_MAX_CONTROLLERS; i++) {
-                status[i].err = PAD_ERR_NOT_READY;
-                memset(&status[i], 0, offsetof(PADStatus, err));
-            }
+    if (!status) {
+        PP_GUARD_NOTIFY("status != NULL", "null pointer");
+        return 0;
+    }
+
+    if (!s_initialized) {
+        // Preserve historical behavior: return a "not ready" array if PADInit was not called.
+        for (s32 i = 0; i < PAD_MAX_CONTROLLERS; i++) {
+            status[i].err = PAD_ERR_NOT_READY;
+            memset(&status[i], 0, offsetof(PADStatus, err));
         }
+        PP_GUARD_NOTIFY("s_initialized", "PADInit must be called first");
         return 0;
     }
     
@@ -704,9 +705,8 @@ u32 PADRead(PADStatus* status) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void PADControlMotor(s32 chan, u32 command) {
-    if (!s_initialized || chan < 0 || chan >= PAD_MAX_CONTROLLERS) {
-        return;
-    }
+    PP_GUARD_VOID(s_initialized, "PADInit must be called first");
+    PP_GUARD_VOID(chan >= 0 && chan < PAD_MAX_CONTROLLERS, "invalid channel");
     
     SDL_GameController* pad = s_gamepads[chan];
     if (!pad) {
@@ -753,9 +753,8 @@ void PADControlMotor(s32 chan, u32 command) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void PADControlAllMotors(const u32* commandArray) {
-    if (!s_initialized || !commandArray) {
-        return;
-    }
+    PP_GUARD_VOID(s_initialized, "PADInit must be called first");
+    PP_GUARD_VOID(commandArray != NULL, "null pointer");
     
     for (s32 chan = 0; chan < PAD_MAX_CONTROLLERS; chan++) {
         PADControlMotor(chan, commandArray[chan]);
@@ -778,9 +777,9 @@ void PADControlAllMotors(const u32* commandArray) {
                 FALSE if not connected or resetting
  *---------------------------------------------------------------------------*/
 BOOL PADGetType(s32 chan, u32* type) {
-    if (!s_initialized || chan < 0 || chan >= PAD_MAX_CONTROLLERS || !type) {
-        return FALSE;
-    }
+    PP_GUARD_RET(s_initialized, FALSE, "PADInit must be called first");
+    PP_GUARD_RET(chan >= 0 && chan < PAD_MAX_CONTROLLERS, FALSE, "invalid channel");
+    PP_GUARD_PTR_RET(type, FALSE);
     
     u32 chanBit = PAD_CHAN0_BIT >> chan;
     
@@ -828,9 +827,7 @@ BOOL PADSync(void) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void PADSetAnalogMode(u32 mode) {
-    if (mode >= 8) {
-        return;
-    }
+    PP_GUARD_VOID(mode < 8, "invalid analog mode");
     
     BOOL enabled = OSDisableInterrupts();
     s_analog_mode = mode;

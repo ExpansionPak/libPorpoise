@@ -5,6 +5,7 @@
 #include <dolphin/card.h>
 #include <dolphin/card_internal.h>
 #include <dolphin/os.h>
+#include <dolphin/porpoise/Guard.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -29,9 +30,9 @@
  *---------------------------------------------------------------------------*/
 s32 CARDCreateAsync(s32 chan, const char* fileName, u32 size,
                     CARDFileInfo* fileInfo, CARDCallback callback) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN || !fileName || !fileInfo) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
+    PP_GUARD_PTR_RET(fileName, CARD_RESULT_FATAL_ERROR);
+    PP_GUARD_PTR_RET(fileInfo, CARD_RESULT_FATAL_ERROR);
     
     if (!__CARDCards[chan].mounted) {
         return CARD_RESULT_NOCARD;

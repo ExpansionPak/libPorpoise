@@ -79,6 +79,7 @@
  *---------------------------------------------------------------------------*/
 
 #include <dolphin/pad.h>
+#include <dolphin/porpoise/Guard.h>
 #include <math.h>
 #include <stdlib.h>
 
@@ -327,9 +328,7 @@ static void ClampTrigger(u8* trigger, u8 min, u8 max) {
   Returns:      None (modifies status array in place)
  *---------------------------------------------------------------------------*/
 void PADClamp(PADStatus* status) {
-    if (!status) {
-        return;
-    }
+    PP_GUARD_VOID(status != NULL, "null pointer");
     
     for (int i = 0; i < PAD_MAX_CONTROLLERS; i++, status++) {
         // Skip if error (controller not connected or not ready)
@@ -373,9 +372,7 @@ void PADClamp(PADStatus* status) {
   Returns:      None (modifies status array in place)
  *---------------------------------------------------------------------------*/
 void PADClampCircle(PADStatus* status) {
-    if (!status) {
-        return;
-    }
+    PP_GUARD_VOID(status != NULL, "null pointer");
     
     for (int i = 0; i < PAD_MAX_CONTROLLERS; i++, status++) {
         if (status->err != PAD_ERR_NONE) {
@@ -417,9 +414,7 @@ void PADClampCircle(PADStatus* status) {
   Returns:      None (modifies status array in place)
  *---------------------------------------------------------------------------*/
 void PADClamp2(PADStatus* status, u32 type) {
-    if (!status) {
-        return;
-    }
+    PP_GUARD_VOID(status != NULL, "null pointer");
     
     const PADClampRegion* stkreg;
     
@@ -462,9 +457,7 @@ void PADClamp2(PADStatus* status, u32 type) {
   Returns:      None (modifies status array in place)
  *---------------------------------------------------------------------------*/
 void PADClampCircle2(PADStatus* status, u32 type) {
-    if (!status) {
-        return;
-    }
+    PP_GUARD_VOID(status != NULL, "null pointer");
     
     const PADClampRegion* stkreg;
     
@@ -505,9 +498,7 @@ void PADClampCircle2(PADStatus* status, u32 type) {
   Returns:      None (modifies status array in place)
  *---------------------------------------------------------------------------*/
 void PADClampTrigger(PADStatus* status, u32 type) {
-    if (!status) {
-        return;
-    }
+    PP_GUARD_VOID(status != NULL, "null pointer");
     
     const PADClampRegion* stkreg;
     

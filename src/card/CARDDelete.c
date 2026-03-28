@@ -5,6 +5,7 @@
 #include <dolphin/card.h>
 #include <dolphin/card_internal.h>
 #include <dolphin/os.h>
+#include <dolphin/porpoise/Guard.h>
 #include <stdio.h>
 
 /*---------------------------------------------------------------------------*
@@ -19,9 +20,8 @@
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDDeleteAsync(s32 chan, const char* fileName, CARDCallback callback) {
-    if (chan < 0 || chan >= CARD_MAX_CHAN || !fileName) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
+    PP_GUARD_PTR_RET(fileName, CARD_RESULT_FATAL_ERROR);
     
     if (!__CARDCards[chan].mounted) {
         return CARD_RESULT_NOCARD;
@@ -70,7 +70,11 @@ s32 CARDDelete(s32 chan, const char* fileName) {
   Returns:      CARD_RESULT_READY on success
  *---------------------------------------------------------------------------*/
 s32 CARDFastDeleteAsync(s32 chan, s32 fileNo, CARDCallback callback) {
-    (void)fileNo;
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
+    PP_GUARD_RET(fileNo >= 0 && fileNo < 127, CARD_RESULT_FATAL_ERROR, "invalid file number");
+    if (!__CARDCards[chan].mounted) {
+        return CARD_RESULT_NOCARD;
+    }
     
     if (callback) {
         callback(chan, CARD_RESULT_READY);

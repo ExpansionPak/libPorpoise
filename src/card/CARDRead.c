@@ -5,6 +5,7 @@
 #include <dolphin/card.h>
 #include <dolphin/card_internal.h>
 #include <dolphin/os.h>
+#include <dolphin/porpoise/Guard.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -23,14 +24,13 @@
  *---------------------------------------------------------------------------*/
 s32 CARDReadAsync(CARDFileInfo* fileInfo, void* buf, s32 length,
                   s32 offset, CARDCallback callback) {
-    if (!fileInfo || !buf) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_PTR_RET(fileInfo, CARD_RESULT_FATAL_ERROR);
+    PP_GUARD_PTR_RET(buf, CARD_RESULT_FATAL_ERROR);
+    PP_GUARD_NONNEG_RET(length, CARD_RESULT_FATAL_ERROR);
+    PP_GUARD_NONNEG_RET(offset, CARD_RESULT_FATAL_ERROR);
     
     s32 chan = fileInfo->chan;
-    if (chan < 0 || chan >= CARD_MAX_CHAN) {
-        return CARD_RESULT_FATAL_ERROR;
-    }
+    PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
     
     if (!__CARDCards[chan].mounted) {
         return CARD_RESULT_NOCARD;
@@ -38,9 +38,8 @@ s32 CARDReadAsync(CARDFileInfo* fileInfo, void* buf, s32 length,
     
     // Get filename from file number
     s32 fileNo = fileInfo->fileNo;
-    if (fileNo < 0 || fileNo >= 127 || __CARDCards[chan].openFiles[fileNo][0] == '\0') {
-        return CARD_RESULT_FATAL_ERROR;  // File not open
-    }
+    PP_GUARD_RET(fileNo >= 0 && fileNo < 127 && __CARDCards[chan].openFiles[fileNo][0] != '\0',
+                 CARD_RESULT_FATAL_ERROR, "file is not open");
     
     const char* fileName = __CARDCards[chan].openFiles[fileNo];
     char path[512];
