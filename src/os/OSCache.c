@@ -24,6 +24,7 @@
  *---------------------------------------------------------------------------*/
 
 #include <dolphin/os.h>
+#include <stdint.h>
 #include <string.h>
 
 #ifdef PORPOISE_USE_GECKO_MEMORY
@@ -34,6 +35,17 @@
 
 /* Locked cache state (for full emulation mode) */
 static BOOL s_locked_cache_enabled = FALSE;
+
+#ifdef PORPOISE_USE_GECKO_MEMORY
+static BOOL PtrToGCAddr(const void* ptr, u32* outAddr) {
+    uintptr_t addr = (uintptr_t)ptr;
+    if (addr > UINT32_MAX) {
+        return FALSE;
+    }
+    *outAddr = (u32)addr;
+    return TRUE;
+}
+#endif
 
 /*---------------------------------------------------------------------------*
   L1 Data Cache Operations
@@ -128,9 +140,9 @@ void DCStoreRangeNoSync(void* addr, u32 nBytes) {
 void DCZeroRange(void* addr, u32 nBytes) {
     if (addr && nBytes > 0) {
         // Align down to 32-byte boundary
-        u32 alignedAddr = ((u32)addr) & ~31;
+        uintptr_t alignedAddr = ((uintptr_t)addr) & ~(uintptr_t)31;
         // Align up size
-        u32 alignedSize = (nBytes + 31) & ~31;
+        size_t alignedSize = ((size_t)nBytes + 31u) & ~(size_t)31u;
         
         memset((void*)alignedAddr, 0, alignedSize);
     }
@@ -340,14 +352,16 @@ void LCLoadBlocks(void* destTag, void* srcAddr, u32 numBlocks) {
 #ifdef PORPOISE_USE_GECKO_MEMORY
     if (g_geckoMemory && s_locked_cache_enabled) {
         /* DMA from main memory to locked cache */
-        u32 destAddr = (u32)destTag;
-        if (GeckoIsLockedCacheAddress(destAddr)) {
+        u32 destAddr;
+        u32 srcAddr32;
+        if (PtrToGCAddr(destTag, &destAddr) && PtrToGCAddr(srcAddr, &srcAddr32)
+            && GeckoIsLockedCacheAddress(destAddr)) {
             u32 offset = destAddr - GECKO_LOCKED_CACHE_BASE;
-            u32 size = numBlocks * 32;
+            u32 size = numBlocks * CACHE_LINE_SIZE;
             
             if (offset + size <= GECKO_LOCKED_CACHE_SIZE) {
                 /* Get source pointer */
-                void* src = GeckoGetPointer(g_geckoMemory, (u32)srcAddr);
+                void* src = GeckoGetPointer(g_geckoMemory, srcAddr32);
                 if (src) {
                     memcpy(&g_geckoMemory->locked_cache[offset], src, size);
                 }
@@ -365,14 +379,16 @@ void LCStoreBlocks(void* destAddr, void* srcTag, u32 numBlocks) {
 #ifdef PORPOISE_USE_GECKO_MEMORY
     if (g_geckoMemory && s_locked_cache_enabled) {
         /* DMA from locked cache to main memory */
-        u32 srcAddr = (u32)srcTag;
-        if (GeckoIsLockedCacheAddress(srcAddr)) {
+        u32 srcAddr;
+        u32 destAddr32;
+        if (PtrToGCAddr(srcTag, &srcAddr) && PtrToGCAddr(destAddr, &destAddr32)
+            && GeckoIsLockedCacheAddress(srcAddr)) {
             u32 offset = srcAddr - GECKO_LOCKED_CACHE_BASE;
-            u32 size = numBlocks * 32;
+            u32 size = numBlocks * CACHE_LINE_SIZE;
             
             if (offset + size <= GECKO_LOCKED_CACHE_SIZE) {
                 /* Get destination pointer */
-                void* dest = GeckoGetPointer(g_geckoMemory, (u32)destAddr);
+                void* dest = GeckoGetPointer(g_geckoMemory, destAddr32);
                 if (dest) {
                     memcpy(dest, &g_geckoMemory->locked_cache[offset], size);
                 }
@@ -391,15 +407,17 @@ u32 LCLoadData(void* destAddr, void* srcAddr, u32 nBytes) {
     if (g_geckoMemory && s_locked_cache_enabled) {
         u32 numBlocks = (nBytes + 31) / 32;
         u32 numTransactions = (numBlocks + 127) / 128; // Max 128 blocks per transaction
+        uintptr_t dest = (uintptr_t)destAddr;
+        uintptr_t src = (uintptr_t)srcAddr;
         
         /* Batch DMA operations (max 128 blocks at a time) */
         while (numBlocks > 0) {
             u32 blocksThisTime = (numBlocks < 128) ? numBlocks : 128;
-            LCLoadBlocks(destAddr, srcAddr, blocksThisTime);
+            LCLoadBlocks((void*)dest, (void*)src, blocksThisTime);
             
             numBlocks -= blocksThisTime;
-            destAddr = (void*)((u32)destAddr + blocksThisTime * 32);
-            srcAddr = (void*)((u32)srcAddr + blocksThisTime * 32);
+            dest += (uintptr_t)(blocksThisTime * CACHE_LINE_SIZE);
+            src += (uintptr_t)(blocksThisTime * CACHE_LINE_SIZE);
         }
         
         return numTransactions;
@@ -417,14 +435,16 @@ u32 LCStoreData(void* destAddr, void* srcAddr, u32 nBytes) {
     if (g_geckoMemory && s_locked_cache_enabled) {
         u32 numBlocks = (nBytes + 31) / 32;
         u32 numTransactions = (numBlocks + 127) / 128;
+        uintptr_t dest = (uintptr_t)destAddr;
+        uintptr_t src = (uintptr_t)srcAddr;
         
         while (numBlocks > 0) {
             u32 blocksThisTime = (numBlocks < 128) ? numBlocks : 128;
-            LCStoreBlocks(destAddr, srcAddr, blocksThisTime);
+            LCStoreBlocks((void*)dest, (void*)src, blocksThisTime);
             
             numBlocks -= blocksThisTime;
-            destAddr = (void*)((u32)destAddr + blocksThisTime * 32);
-            srcAddr = (void*)((u32)srcAddr + blocksThisTime * 32);
+            dest += (uintptr_t)(blocksThisTime * CACHE_LINE_SIZE);
+            src += (uintptr_t)(blocksThisTime * CACHE_LINE_SIZE);
         }
         
         return numTransactions;
@@ -460,8 +480,8 @@ void LCAlloc(void* addr, u32 nBytes) {
         }
         
         /* Invalidate the region to ensure no stale cache data */
-        u32 destAddr = (u32)addr;
-        if (GeckoIsLockedCacheAddress(destAddr)) {
+        u32 destAddr;
+        if (PtrToGCAddr(addr, &destAddr) && GeckoIsLockedCacheAddress(destAddr)) {
             u32 offset = destAddr - GECKO_LOCKED_CACHE_BASE;
             if (offset + nBytes <= GECKO_LOCKED_CACHE_SIZE) {
                 memset(&g_geckoMemory->locked_cache[offset], 0, nBytes);
@@ -491,11 +511,11 @@ void LCAllocNoInvalidate(void* addr, u32 nBytes) {
 void LCAllocOneTag(BOOL invalidate, void* tag) {
 #ifdef PORPOISE_USE_GECKO_MEMORY
     if (g_geckoMemory && s_locked_cache_enabled) {
-        u32 addr = (u32)tag;
-        if (GeckoIsLockedCacheAddress(addr)) {
+        u32 addr32;
+        if (PtrToGCAddr(tag, &addr32) && GeckoIsLockedCacheAddress(addr32)) {
             if (invalidate) {
-                u32 offset = addr - GECKO_LOCKED_CACHE_BASE;
-                memset(&g_geckoMemory->locked_cache[offset], 0, 32);
+                u32 offset = addr32 - GECKO_LOCKED_CACHE_BASE;
+                memset(&g_geckoMemory->locked_cache[offset], 0, CACHE_LINE_SIZE);
             }
         }
     }
@@ -508,11 +528,11 @@ void LCAllocOneTag(BOOL invalidate, void* tag) {
 void LCAllocTags(BOOL invalidate, void* startTag, u32 numBlocks) {
 #ifdef PORPOISE_USE_GECKO_MEMORY
     if (g_geckoMemory && s_locked_cache_enabled) {
-        u32 addr = (u32)startTag;
-        if (GeckoIsLockedCacheAddress(addr)) {
+        u32 addr32;
+        if (PtrToGCAddr(startTag, &addr32) && GeckoIsLockedCacheAddress(addr32)) {
             if (invalidate) {
-                u32 offset = addr - GECKO_LOCKED_CACHE_BASE;
-                u32 size = numBlocks * 32;
+                u32 offset = addr32 - GECKO_LOCKED_CACHE_BASE;
+                u32 size = numBlocks * CACHE_LINE_SIZE;
                 if (offset + size <= GECKO_LOCKED_CACHE_SIZE) {
                     memset(&g_geckoMemory->locked_cache[offset], 0, size);
                 }
