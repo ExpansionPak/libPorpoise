@@ -681,8 +681,18 @@ void* OSAllocFromHeap(OSHeapHandle heap, u32 size) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void OSFreeToHeap(OSHeapHandle heap, void* ptr) {
-    if (!s_heapArray) {
-        OSPanic(__FILE__, __LINE__, "OSFreeToHeap: No heaps initialized");
+    if (!s_heapArray || __OSCurrHeap < 0) {
+        if (!OSEnsureDefaultHeap()) {
+            OSPanic(__FILE__, __LINE__, "OSFreeToHeap: No heaps initialized");
+        }
+    }
+
+    if (heap < 0) {
+        heap = __OSCurrHeap;
+    }
+
+    if (heap < 0 || heap >= s_numHeaps) {
+        OSPanic(__FILE__, __LINE__, "OSFreeToHeap: Invalid heap");
     }
     
     if (!InRange(ptr, (char*)s_arenaStart + HEADERSIZE, (char*)s_arenaEnd)) {
