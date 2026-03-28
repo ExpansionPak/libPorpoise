@@ -47,6 +47,10 @@
 #include <string.h>
 #include <stdint.h>
 
+/* Internal interrupt-lock helpers from OSInterrupt.c */
+extern u32 __OSSuspendInterruptLockForSleep(void);
+extern void __OSResumeInterruptLockAfterSleep(u32 depth);
+
 /* Store/load 64-bit pointer in gpr[0..1] for PC builds (context.gpr is u32[]) */
 #if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
 #define PLATFORM_PTR_STORE(ctxt, ptr) do { \
@@ -63,6 +67,8 @@
 #define PLATFORM_PTR_IS_NULL(ctxt) ((ctxt)->gpr[0] == 0)
 #define PLATFORM_PTR_CLEAR(ctxt) ((ctxt)->gpr[0] = 0)
 #endif
+
+#define OS_THREAD_ATTR_JOINING 0x8000u
 
 #ifdef _WIN32
 #include <windows.h>
@@ -89,6 +95,19 @@ typedef struct PlatformThread {
 } PlatformThread;
 #endif
 
+typedef struct OSSleepQueueState {
+    OSThreadQueue* queue;
+    volatile u32 generation;
+#ifdef _WIN32
+    CRITICAL_SECTION mutex;
+    CONDITION_VARIABLE cond;
+#else
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+#endif
+    struct OSSleepQueueState* next;
+} OSSleepQueueState;
+
 /* Global thread state */
 static OSThread s_idleThread;
 static OSThread s_mainThread;  /* Represents the main/initial thread */
@@ -104,6 +123,80 @@ static OSSwitchThreadCallback s_switchCallback = NULL;
 #define PORPOISE_THREAD_LOCAL
 #endif
 static PORPOISE_THREAD_LOCAL OSThread* s_tlsCurrentThread = NULL;
+
+static OSSleepQueueState* s_sleepQueueStates = NULL;
+#ifdef _WIN32
+static CRITICAL_SECTION s_sleepQueueListMutex;
+static INIT_ONCE s_sleepQueueInitOnce = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK InitSleepQueueStateOnce(PINIT_ONCE once, PVOID param, PVOID* context) {
+    (void)once;
+    (void)param;
+    (void)context;
+    InitializeCriticalSection(&s_sleepQueueListMutex);
+    return TRUE;
+}
+
+static void EnsureSleepQueueStateInitialized(void) {
+    InitOnceExecuteOnce(&s_sleepQueueInitOnce, InitSleepQueueStateOnce, NULL, NULL);
+}
+#else
+static pthread_mutex_t s_sleepQueueListMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void EnsureSleepQueueStateInitialized(void) {
+    /* POSIX static initializer covers this. */
+}
+#endif
+
+static OSSleepQueueState* GetSleepQueueState(OSThreadQueue* queue) {
+    if (!queue) {
+        return NULL;
+    }
+
+    EnsureSleepQueueStateInitialized();
+
+#ifdef _WIN32
+    EnterCriticalSection(&s_sleepQueueListMutex);
+#else
+    pthread_mutex_lock(&s_sleepQueueListMutex);
+#endif
+
+    OSSleepQueueState* state = s_sleepQueueStates;
+    while (state) {
+        if (state->queue == queue) {
+#ifdef _WIN32
+            LeaveCriticalSection(&s_sleepQueueListMutex);
+#else
+            pthread_mutex_unlock(&s_sleepQueueListMutex);
+#endif
+            return state;
+        }
+        state = state->next;
+    }
+
+    state = (OSSleepQueueState*)calloc(1, sizeof(OSSleepQueueState));
+    if (state) {
+        state->queue = queue;
+        state->generation = 0;
+#ifdef _WIN32
+        InitializeCriticalSection(&state->mutex);
+        InitializeConditionVariable(&state->cond);
+#else
+        pthread_mutex_init(&state->mutex, NULL);
+        pthread_cond_init(&state->cond, NULL);
+#endif
+        state->next = s_sleepQueueStates;
+        s_sleepQueueStates = state;
+    }
+
+#ifdef _WIN32
+    LeaveCriticalSection(&s_sleepQueueListMutex);
+#else
+    pthread_mutex_unlock(&s_sleepQueueListMutex);
+#endif
+
+    return state;
+}
 
 /* Thread wrapper function */
 #ifdef _WIN32
@@ -123,6 +216,8 @@ static DWORD WINAPI ThreadWrapper(LPVOID param) {
     
     thread->state = OS_THREAD_STATE_MORIBUND;
     thread->val = result;
+    thread->error = 0;
+    OSWakeupThread(&thread->queueJoin);
     return 0;
 }
 #else
@@ -142,6 +237,8 @@ static void* ThreadWrapper(void* param) {
     
     thread->state = OS_THREAD_STATE_MORIBUND;
     thread->val = result;
+    thread->error = 0;
+    OSWakeupThread(&thread->queueJoin);
     return result;
 }
 #endif
@@ -335,6 +432,7 @@ BOOL OSCreateThread(OSThread* thread, void* (*func)(void*), void* param,
     thread->stackBase = (u8*)stack;
     thread->stackEnd = (u32*)((u8*)stack - stackSize);
     thread->val = NULL;
+    thread->error = 0;
     thread->mutex = NULL;
     
     /* Initialize queues */
@@ -381,6 +479,7 @@ void OSExitThread(void* val) {
     OSThread* thread = OSGetCurrentThread();
     if (thread) {
         thread->val = val;
+        thread->error = 0;
         thread->state = OS_THREAD_STATE_MORIBUND;
         
         /* Wake up threads waiting in OSJoinThread */
@@ -422,8 +521,12 @@ void OSCancelThread(OSThread* thread) {
 #endif
     
     thread->state = OS_THREAD_STATE_MORIBUND;
+    thread->error = 1;
+    thread->val = (void*)(uintptr_t)-1;
     free(platform);
     PLATFORM_PTR_CLEAR(&thread->context);
+
+    OSWakeupThread(&thread->queueJoin);
 }
 
 /*---------------------------------------------------------------------------*
@@ -441,35 +544,61 @@ void OSCancelThread(OSThread* thread) {
  *---------------------------------------------------------------------------*/
 BOOL OSJoinThread(OSThread* thread, void** val) {
     if (!thread) return FALSE;
-    
-    /* Wait for thread to terminate */
-    while (!OSIsThreadTerminated(thread)) {
-        OSSleepThread(&thread->queueJoin);
+    if (thread == OSGetCurrentThread()) return FALSE;
+
+    BOOL enabled = OSDisableInterrupts();
+    if ((thread->attr & OS_THREAD_ATTR_DETACH) || (thread->attr & OS_THREAD_ATTR_JOINING)) {
+        OSRestoreInterrupts(enabled);
+        return FALSE;
     }
-    
-    /* Get exit value */
+    thread->attr |= OS_THREAD_ATTR_JOINING;
+    OSRestoreInterrupts(enabled);
+
+    if (!PLATFORM_PTR_IS_NULL(&thread->context)) {
+        PlatformThread* platform = (PlatformThread*)PLATFORM_PTR_LOAD(&thread->context);
+        if (platform) {
+#ifdef _WIN32
+            if (platform->handle) {
+                DWORD waitResult = WaitForSingleObject(platform->handle, INFINITE);
+                if (waitResult != WAIT_OBJECT_0) {
+                    enabled = OSDisableInterrupts();
+                    thread->attr &= ~OS_THREAD_ATTR_JOINING;
+                    OSRestoreInterrupts(enabled);
+                    return FALSE;
+                }
+                CloseHandle(platform->handle);
+                platform->handle = NULL;
+            }
+#else
+            if (platform->handle) {
+                if (pthread_join(platform->handle, NULL) != 0) {
+                    enabled = OSDisableInterrupts();
+                    thread->attr &= ~OS_THREAD_ATTR_JOINING;
+                    OSRestoreInterrupts(enabled);
+                    return FALSE;
+                }
+            }
+#endif
+            free(platform);
+            PLATFORM_PTR_CLEAR(&thread->context);
+        }
+    } else {
+        while (!OSIsThreadTerminated(thread)) {
+            OSSleepThread(&thread->queueJoin);
+        }
+    }
+
     if (val) {
         *val = thread->val;
     }
-    
-    /* Clean up platform thread handle */
-    if (!PLATFORM_PTR_IS_NULL(&thread->context)) {
-        PlatformThread* platform = (PlatformThread*)PLATFORM_PTR_LOAD(&thread->context);
-        
-#ifdef _WIN32
-        if (platform->handle) {
-            WaitForSingleObject(platform->handle, INFINITE);
-            CloseHandle(platform->handle);
-            platform->handle = NULL;
-        }
-#else
-        if (platform->handle) {
-            pthread_join(platform->handle, NULL);
-        }
-#endif
-    }
-    
-    return TRUE;
+
+    /* Reclaimed: further joins should fail. */
+    enabled = OSDisableInterrupts();
+    thread->attr &= ~OS_THREAD_ATTR_JOINING;
+    thread->attr |= OS_THREAD_ATTR_DETACH;
+    OSRestoreInterrupts(enabled);
+
+    return (thread->error == 0) ? TRUE : FALSE;
 }
 
 /*---------------------------------------------------------------------------*
@@ -644,19 +773,52 @@ OSPriority OSGetThreadPriority(OSThread* thread) {
   Arguments:    queue - Queue to sleep on (can be NULL for simple sleep)
  *---------------------------------------------------------------------------*/
 void OSSleepThread(OSThreadQueue* queue) {
-    /* Original hardware: Thread is removed from run queue and added to
-     * the wait queue. Scheduler picks next thread to run.
-     * 
-     * PC: We just sleep briefly. Proper implementation would use
-     * condition variables.
-     */
-    (void)queue;
-    
+    if (!queue) {
 #ifdef _WIN32
-    Sleep(1);
+        Sleep(1);
 #else
-    usleep(1000);
+        usleep(1000);
 #endif
+        return;
+    }
+
+    OSSleepQueueState* state = GetSleepQueueState(queue);
+    if (!state) {
+#ifdef _WIN32
+        Sleep(1);
+#else
+        usleep(1000);
+#endif
+        return;
+    }
+
+    /* Avoid lost wakeups by holding the queue mutex before dropping the
+     * interrupt lock and blocking on the condition variable.
+     */
+#ifdef _WIN32
+    EnterCriticalSection(&state->mutex);
+#else
+    pthread_mutex_lock(&state->mutex);
+#endif
+
+    u32 observedGeneration = state->generation;
+    u32 releasedDepth = __OSSuspendInterruptLockForSleep();
+
+    while (state->generation == observedGeneration) {
+#ifdef _WIN32
+        SleepConditionVariableCS(&state->cond, &state->mutex, INFINITE);
+#else
+        pthread_cond_wait(&state->cond, &state->mutex);
+#endif
+    }
+
+#ifdef _WIN32
+    LeaveCriticalSection(&state->mutex);
+#else
+    pthread_mutex_unlock(&state->mutex);
+#endif
+
+    __OSResumeInterruptLockAfterSleep(releasedDepth);
 }
 
 /*---------------------------------------------------------------------------*
@@ -670,13 +832,22 @@ void OSSleepThread(OSThreadQueue* queue) {
   Arguments:    queue - Queue to wake up
  *---------------------------------------------------------------------------*/
 void OSWakeupThread(OSThreadQueue* queue) {
-    /* Original hardware: All threads in the queue are moved to run queue.
-     * 
-     * PC: Proper implementation needs condition variables.
-     * For now, this is a stub.
-     */
-    (void)queue;
-    /* TODO: Implement with condition variables */
+    if (!queue) return;
+
+    OSSleepQueueState* state = GetSleepQueueState(queue);
+    if (!state) return;
+
+#ifdef _WIN32
+    EnterCriticalSection(&state->mutex);
+    state->generation++;
+    WakeAllConditionVariable(&state->cond);
+    LeaveCriticalSection(&state->mutex);
+#else
+    pthread_mutex_lock(&state->mutex);
+    state->generation++;
+    pthread_cond_broadcast(&state->cond);
+    pthread_mutex_unlock(&state->mutex);
+#endif
 }
 
 /*---------------------------------------------------------------------------*

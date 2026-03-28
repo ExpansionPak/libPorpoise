@@ -155,6 +155,21 @@
 
 #include <dolphin/os.h>
 #include <string.h>
+#include <stdint.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
+#if defined(_MSC_VER)
+#define PORPOISE_THREAD_LOCAL __declspec(thread)
+#elif defined(__GNUC__) || defined(__clang__)
+#define PORPOISE_THREAD_LOCAL __thread
+#else
+#define PORPOISE_THREAD_LOCAL
+#endif
 
 /* Interrupt handler table */
 static __OSInterruptHandler s_interruptHandlers[__OS_INTERRUPT_MAX] = {NULL};
@@ -163,6 +178,55 @@ static __OSInterruptHandler s_interruptHandlers[__OS_INTERRUPT_MAX] = {NULL};
 static OSInterruptMask s_globalMask = 0xFFFFFFFF;  /* All masked initially */
 static OSInterruptMask s_currentMask = 0xFFFFFFFF;
 static BOOL s_interruptsEnabled = TRUE;
+static PORPOISE_THREAD_LOCAL u32 s_tlsInterruptDisableDepth = 0;
+
+#ifdef _WIN32
+static CRITICAL_SECTION s_interruptLock;
+static INIT_ONCE s_interruptLockInitOnce = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK InitInterruptLockOnce(PINIT_ONCE once, PVOID param, PVOID* context) {
+    (void)once;
+    (void)param;
+    (void)context;
+    InitializeCriticalSection(&s_interruptLock);
+    return TRUE;
+}
+
+static void EnsureInterruptLockInitialized(void) {
+    InitOnceExecuteOnce(&s_interruptLockInitOnce, InitInterruptLockOnce, NULL, NULL);
+}
+
+static void InterruptLockEnter(void) {
+    EnterCriticalSection(&s_interruptLock);
+}
+
+static void InterruptLockLeave(void) {
+    LeaveCriticalSection(&s_interruptLock);
+}
+#else
+static pthread_mutex_t s_interruptLock;
+static pthread_once_t s_interruptLockInitOnce = PTHREAD_ONCE_INIT;
+
+static void InitInterruptLockOnce(void) {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&s_interruptLock, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+
+static void EnsureInterruptLockInitialized(void) {
+    pthread_once(&s_interruptLockInitOnce, InitInterruptLockOnce);
+}
+
+static void InterruptLockEnter(void) {
+    pthread_mutex_lock(&s_interruptLock);
+}
+
+static void InterruptLockLeave(void) {
+    pthread_mutex_unlock(&s_interruptLock);
+}
+#endif
 
 /* Debug: Interrupt names for logging */
 #ifdef _DEBUG
@@ -414,22 +478,13 @@ OSInterruptMask __OSUnmaskInterrupts(OSInterruptMask mask) {
   Returns:      TRUE if interrupts were enabled, FALSE otherwise
  *---------------------------------------------------------------------------*/
 BOOL OSDisableInterrupts(void) {
-    /* Original hardware:
-     * - Atomically reads MSR[EE] and clears it
-     * - Prevents hardware interrupts from being taken
-     * - Returns previous state (TRUE = was enabled)
-     * 
-     * PC: We can't actually disable interrupts. Just track state.
-     */
-    BOOL wasEnabled = s_interruptsEnabled;
+    EnsureInterruptLockInitialized();
+
+    /* Serialize GC-style critical sections across host threads. */
+    BOOL wasEnabled = (s_tlsInterruptDisableDepth == 0);
+    InterruptLockEnter();
+    s_tlsInterruptDisableDepth++;
     s_interruptsEnabled = FALSE;
-    
-    /* NOTE: On PC, interrupts are STILL enabled at OS level!
-     * This is just for API compatibility. If your game relies on
-     * OSDisableInterrupts for critical sections, you MUST use
-     * mutexes instead on PC.
-     */
-    
     return wasEnabled;
 }
 
@@ -452,14 +507,13 @@ BOOL OSDisableInterrupts(void) {
   Returns:      TRUE if interrupts were enabled, FALSE otherwise
  *---------------------------------------------------------------------------*/
 BOOL OSEnableInterrupts(void) {
-    /* Original hardware:
-     * - Atomically reads MSR[EE] and sets it
-     * - Allows hardware interrupts to be taken
-     * - Returns previous state (TRUE = was enabled)
-     * 
-     * PC: Track state only.
-     */
-    BOOL wasEnabled = s_interruptsEnabled;
+    EnsureInterruptLockInitialized();
+
+    BOOL wasEnabled = (s_tlsInterruptDisableDepth == 0);
+    while (s_tlsInterruptDisableDepth > 0) {
+        InterruptLockLeave();
+        s_tlsInterruptDisableDepth--;
+    }
     s_interruptsEnabled = TRUE;
     return wasEnabled;
 }
@@ -488,15 +542,53 @@ BOOL OSEnableInterrupts(void) {
   Returns:      Previous state (before this call)
  *---------------------------------------------------------------------------*/
 BOOL OSRestoreInterrupts(BOOL level) {
-    /* Original hardware:
-     * - Restores MSR[EE] to specified level
-     * - Used to restore after critical section
-     * 
-     * PC: Track state only.
-     */
-    BOOL prev = s_interruptsEnabled;
-    s_interruptsEnabled = (level != FALSE);
+    EnsureInterruptLockInitialized();
+
+    BOOL prev = (s_tlsInterruptDisableDepth == 0);
+
+    /* Unwind one disable level for this restore call. */
+    if (s_tlsInterruptDisableDepth > 0) {
+        InterruptLockLeave();
+        s_tlsInterruptDisableDepth--;
+    }
+
+    if (level) {
+        while (s_tlsInterruptDisableDepth > 0) {
+            InterruptLockLeave();
+            s_tlsInterruptDisableDepth--;
+        }
+    } else if (s_tlsInterruptDisableDepth == 0) {
+        InterruptLockEnter();
+        s_tlsInterruptDisableDepth = 1;
+    }
+
+    s_interruptsEnabled = (s_tlsInterruptDisableDepth == 0) ? TRUE : FALSE;
     return prev;
+}
+
+/*---------------------------------------------------------------------------*
+  Internal helpers used by OSSleepThread/OSWakeupThread implementation.
+ *---------------------------------------------------------------------------*/
+u32 __OSSuspendInterruptLockForSleep(void) {
+    EnsureInterruptLockInitialized();
+
+    u32 released = s_tlsInterruptDisableDepth;
+    while (s_tlsInterruptDisableDepth > 0) {
+        InterruptLockLeave();
+        s_tlsInterruptDisableDepth--;
+    }
+    s_interruptsEnabled = TRUE;
+    return released;
+}
+
+void __OSResumeInterruptLockAfterSleep(u32 depth) {
+    EnsureInterruptLockInitialized();
+
+    while (depth-- > 0) {
+        InterruptLockEnter();
+        s_tlsInterruptDisableDepth++;
+    }
+    s_interruptsEnabled = (s_tlsInterruptDisableDepth == 0) ? TRUE : FALSE;
 }
 
 /*===========================================================================*
@@ -519,6 +611,8 @@ BOOL OSRestoreInterrupts(BOOL level) {
   Arguments:    None
  *---------------------------------------------------------------------------*/
 void __OSInterruptInit(void) {
+    EnsureInterruptLockInitialized();
+
     /* Clear handler table */
     memset(s_interruptHandlers, 0, sizeof(s_interruptHandlers));
     

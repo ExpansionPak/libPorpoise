@@ -140,6 +140,7 @@
 
 #include <dolphin/os.h>
 #include <string.h>
+#include <stdint.h>
 
 /* Memory sizes (matches real hardware) - just constants, no allocation */
 #define MEM1_SIZE  (24 * 1024 * 1024)  /* 24 MB */
@@ -333,11 +334,11 @@ void OSProtectRange(u32 chan, void* addr, u32 nBytes, u32 control) {
     
 #ifdef _DEBUG
     /* Debug mode: Track protection ranges for logging/validation */
-    u32 start = (u32)addr & ~0x3FF;  /* Round down to 1KB */
-    u32 end = ((u32)addr + nBytes + 0x3FF) & ~0x3FF;  /* Round up to 1KB */
+    uintptr_t start = ((uintptr_t)addr) & ~(uintptr_t)0x3FF;  /* Round down to 1KB */
+    uintptr_t end = (((uintptr_t)addr) + (uintptr_t)nBytes + 0x3FFu) & ~(uintptr_t)0x3FF;  /* Round up to 1KB */
     
     s_protectionChannels[chan].addr = (void*)start;
-    s_protectionChannels[chan].size = end - start;
+    s_protectionChannels[chan].size = (u32)(end - start);
     s_protectionChannels[chan].control = control & OS_PROTECT_CONTROL_RDWR;
     s_protectionChannels[chan].active = (control != OS_PROTECT_CONTROL_NONE);
     
@@ -351,8 +352,8 @@ void OSProtectRange(u32 chan, void* addr, u32 nBytes, u32 control) {
     }
     
     if (s_protectionChannels[chan].active) {
-        OSReport("[OSMemory] Channel %u: Protect 0x%08X - 0x%08X (%u bytes) [%s]\n",
-                 chan, start, end, end - start, controlStr);
+        OSReport("[OSMemory] Channel %u: Protect %p - %p (%u bytes) [%s]\n",
+                 chan, (void*)start, (void*)end, (u32)(end - start), controlStr);
         OSReport("            NOTE: Protection is NOT enforced on PC!\n");
         OSReport("            Use debugger watchpoints for memory debugging.\n");
     } else {
