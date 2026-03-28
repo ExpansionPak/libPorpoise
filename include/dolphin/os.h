@@ -10,6 +10,7 @@
 #include "dolphin/os/OSSemaphore.h"
 #include "dolphin/os/OSAlarm.h"
 #include "dolphin/os/OSMessage.h"
+#include "dolphin/os/OSFastCast.h"
 #include "dolphin/os/OSAlloc.h"
 #include "dolphin/os/OSCache.h"
 #include "dolphin/os/OSError.h"

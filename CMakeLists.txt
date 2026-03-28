@@ -164,6 +164,7 @@ endif()
 set(PORPOISE_SOURCES
     # Core OS
     src/os/OS.c
+    src/os/OSFastCast.c
     ${OS_THREAD_SOURCE}
     src/os/OSMutex.c
     src/os/OSTime.c
