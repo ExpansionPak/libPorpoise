@@ -736,9 +736,7 @@ BOOL DVDReadDir(DVDDir* dir, DVDDirEntry* dirent) {
   Returns:      TRUE if closed successfully
  *---------------------------------------------------------------------------*/
 BOOL DVDCloseDir(DVDDir* dir) {
-    if (!dir) {
-        return FALSE;
-    }
+    PP_GUARD_PTR_RET(dir, FALSE);
     
     int stateIndex = dir->entryNum;
     if (stateIndex < 0 || stateIndex >= MAX_OPEN_DIRS || !s_dirStateUsed[stateIndex]) {
@@ -775,9 +773,7 @@ BOOL DVDCloseDir(DVDDir* dir) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void DVDRewindDir(DVDDir* dir) {
-    if (!dir) {
-        return;
-    }
+    PP_GUARD_VOID(dir != NULL, "null pointer");
     
     int stateIndex = dir->entryNum;
     if (stateIndex < 0 || stateIndex >= MAX_OPEN_DIRS || !s_dirStateUsed[stateIndex]) {
@@ -817,9 +813,8 @@ void DVDRewindDir(DVDDir* dir) {
   Returns:      TRUE if successful
  *---------------------------------------------------------------------------*/
 BOOL DVDGetCurrentDir(char* path, u32 maxlen) {
-    if (!path || maxlen == 0) {
-        return FALSE;
-    }
+    PP_GUARD_PTR_RET(path, FALSE);
+    PP_GUARD_RET(maxlen > 0, FALSE, "maxlen must be > 0");
     
     strncpy(path, s_currentDir, maxlen - 1);
     path[maxlen - 1] = '\0';
@@ -836,9 +831,8 @@ BOOL DVDGetCurrentDir(char* path, u32 maxlen) {
   Returns:      TRUE if successful
  *---------------------------------------------------------------------------*/
 BOOL DVDChangeDir(const char* dirName) {
-    if (!s_initialized || !dirName) {
-        return FALSE;
-    }
+    PP_GUARD_RET(s_initialized, FALSE, "DVDInit must be called first");
+    PP_GUARD_PTR_RET(dirName, FALSE);
     
     // Build full path to verify it exists
     char fullPath[512];
@@ -895,9 +889,7 @@ DVDDiskID* DVDGetDiskID(void) {
   Returns:      TRUE if path is valid
  *---------------------------------------------------------------------------*/
 BOOL DVDSetRootDirectory(const char* path) {
-    if (!path) {
-        return FALSE;
-    }
+    PP_GUARD_PTR_RET(path, FALSE);
     
     // Verify directory exists
     struct stat st;
@@ -1187,6 +1179,7 @@ BOOL DVDResume(void) {
  *---------------------------------------------------------------------------*/
 BOOL DVDSeekAsyncPrio(DVDFileInfo* fileInfo, s32 offset, DVDCallback callback, s32 prio) {
     (void)prio;
+    PP_GUARD_PTR_RET(fileInfo, FALSE);
     
     s32 result = DVDSeek(fileInfo, offset);
     
@@ -1473,7 +1466,7 @@ BOOL DVDCheckDiskAsync(DVDCommandBlock* block, DVDCBCallback callback) {
  *---------------------------------------------------------------------------*/
 BOOL DVDPrepareStreamAbsAsync(DVDCommandBlock* block, u32 length, u32 offset,
                                DVDCBCallback callback) {
-    (void)block;
+    PP_GUARD_PTR_RET(block, FALSE);
     (void)length;
     (void)offset;
     
@@ -1498,7 +1491,7 @@ BOOL DVDPrepareStreamAbsAsync(DVDCommandBlock* block, u32 length, u32 offset,
   Returns:      TRUE always
  *---------------------------------------------------------------------------*/
 BOOL DVDCancelStreamAsync(DVDCommandBlock* block, DVDCBCallback callback) {
-    (void)block;
+    PP_GUARD_PTR_RET(block, FALSE);
     
     if (callback) {
         callback(DVD_RESULT_GOOD, block);
@@ -1517,7 +1510,7 @@ BOOL DVDCancelStreamAsync(DVDCommandBlock* block, DVDCBCallback callback) {
   Returns:      DVD_RESULT_GOOD
  *---------------------------------------------------------------------------*/
 s32 DVDCancelStream(DVDCommandBlock* block) {
-    (void)block;
+    PP_GUARD_PTR_RET(block, DVD_RESULT_FATAL_ERROR);
     return DVD_RESULT_GOOD;
 }
 
@@ -1602,7 +1595,7 @@ void DVDReset(void) {
  *---------------------------------------------------------------------------*/
 BOOL DVDPrepareStreamAsync(DVDCommandBlock* block, u32 length, u32 offset,
                            DVDCBCallback callback) {
-    (void)block;
+    PP_GUARD_PTR_RET(block, FALSE);
     (void)length;
     (void)offset;
     

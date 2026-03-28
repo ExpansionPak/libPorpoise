@@ -49,6 +49,7 @@
 #include <dolphin/VIConfig.h>
 #include <dolphin/os.h>
 #include <dolphin/os/OSAlarm.h>
+#include <dolphin/porpoise/Guard.h>
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <string.h>
@@ -447,9 +448,7 @@ void __VIInit(VITVMode mode) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void VIWaitForRetrace(void) {
-    if (!s_initialized) {
-        return;
-    }
+    PP_GUARD_VOID(s_initialized, "VIInit must be called first");
     
     u32 currentCount = s_retraceCount;
     
@@ -474,9 +473,8 @@ void VIWaitForRetrace(void) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void VIFlush(void) {
-    if (!s_initialized || !s_window) {
-        return;
-    }
+    PP_GUARD_VOID(s_initialized, "VIInit must be called first");
+    PP_GUARD_VOID(s_window != NULL, "window not initialized");
     ProcessWindowEvents();
     
     // Don't swap here - swap is handled by DEMOSwapBuffers() after rendering
@@ -577,9 +575,7 @@ void VISet3D(BOOL threeD) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void VIConfigure(const GXRenderModeObj* rm) {
-    if (!rm) {
-        return;
-    }
+    PP_GUARD_VOID(rm != NULL, "null pointer");
 
     if (rm->fbWidth > 0) {
         s_xfbWidth = (int)VIPadFrameBufferWidth(rm->fbWidth);
@@ -959,17 +955,19 @@ static void VIPresentCurrentFrameBuffer(void) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void VISwapBuffers(void) {
-    if (s_window && s_glContext) {
-        if (VIIsRenderSuspended()) {
-            return;
-        }
+    PP_GUARD_VOID(s_initialized, "VIInit must be called first");
+    PP_GUARD_VOID(s_window != NULL, "window not initialized");
+    PP_GUARD_VOID(s_glContext != NULL, "GL context not initialized");
 
-        // Ensure context is current before swapping
-        if (SDL_GL_MakeCurrent(s_window, s_glContext) != 0) {
-            OSReport("[VISwapBuffers] ERROR: SDL_GL_MakeCurrent failed: %s\n", SDL_GetError());
-            return;
-        }
-        VIPresentCurrentFrameBuffer();
-        SDL_GL_SwapWindow(s_window);
+    if (VIIsRenderSuspended()) {
+        return;
     }
+
+    // Ensure context is current before swapping
+    if (SDL_GL_MakeCurrent(s_window, s_glContext) != 0) {
+        OSReport("[VISwapBuffers] ERROR: SDL_GL_MakeCurrent failed: %s\n", SDL_GetError());
+        return;
+    }
+    VIPresentCurrentFrameBuffer();
+    SDL_GL_SwapWindow(s_window);
 }

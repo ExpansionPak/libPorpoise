@@ -5,6 +5,7 @@
 
 #include <dolphin/VIConfig.h>
 #include <dolphin/os.h>
+#include <dolphin/porpoise/Guard.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,7 +21,7 @@
   Returns:      None
  *---------------------------------------------------------------------------*/
 void VIGetDefaultConfig(VIConfig* config) {
-    if (!config) return;
+    PP_GUARD_VOID(config != NULL, "null pointer");
     
     // Display defaults
     config->windowWidth = 640;
@@ -116,7 +117,7 @@ BOOL VILoadConfig(VIConfig* config) {
     char* value;
     char* equals;
     
-    if (!config) return FALSE;
+    PP_GUARD_PTR_RET(config, FALSE);
     
     // Start with defaults
     VIGetDefaultConfig(config);
