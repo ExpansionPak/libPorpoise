@@ -15,6 +15,7 @@
 #include <dolphin/os.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -57,6 +58,12 @@ static void* AlarmThreadFunc(void* arg);
 static void LockAlarmQueue(void);
 static void UnlockAlarmQueue(void);
 static void InitAlarmSystem(void);
+static BOOL IsAlarmQueuedLocked(const OSAlarm* alarm);
+static BOOL RemoveAlarmLocked(OSAlarm* alarm, BOOL clearHandler);
+
+#ifndef _WIN32
+static void AddMillisecondsToTimespec(struct timespec* ts, u32 ms);
+#endif
 
 /*---------------------------------------------------------------------------*
   Name:         LockAlarmQueue / UnlockAlarmQueue
@@ -107,6 +114,67 @@ static void InitAlarmSystem(void) {
     s_alarmSystemInitialized = TRUE;
 }
 
+static BOOL IsAlarmQueuedLocked(const OSAlarm* alarm) {
+    for (OSAlarm* current = s_alarmQueue.head; current; current = current->next) {
+        if (current == alarm) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL RemoveAlarmLocked(OSAlarm* alarm, BOOL clearHandler) {
+    if (!alarm || !IsAlarmQueuedLocked(alarm)) {
+        return FALSE;
+    }
+
+    const BOOL wasHead = (s_alarmQueue.head == alarm);
+
+    if (alarm->next == NULL) {
+        s_alarmQueue.tail = alarm->prev;
+    } else {
+        alarm->next->prev = alarm->prev;
+    }
+
+    if (alarm->prev) {
+        alarm->prev->next = alarm->next;
+    } else {
+        s_alarmQueue.head = alarm->next;
+    }
+
+    alarm->prev = NULL;
+    alarm->next = NULL;
+    if (clearHandler) {
+        alarm->handler = NULL;
+    }
+
+    if (wasHead) {
+#ifdef _WIN32
+        SetEvent(s_alarmEvent);
+#else
+        pthread_cond_signal(&s_alarmCond);
+#endif
+    }
+
+    return TRUE;
+}
+
+#ifndef _WIN32
+static void AddMillisecondsToTimespec(struct timespec* ts, u32 ms) {
+    if (!ts) {
+        return;
+    }
+
+    ts->tv_sec += (time_t)(ms / 1000);
+    long nsec = ts->tv_nsec + (long)((ms % 1000) * 1000000L);
+    if (nsec >= 1000000000L) {
+        ts->tv_sec += 1;
+        nsec -= 1000000000L;
+    }
+    ts->tv_nsec = nsec;
+}
+#endif
+
 /*---------------------------------------------------------------------------*
   Name:         AlarmThreadFunc
 
@@ -126,14 +194,14 @@ static void* AlarmThreadFunc(void* arg) {
         
         if (alarm == NULL) {
             // No alarms pending, wait for signal
-            UnlockAlarmQueue();
-            
 #ifdef _WIN32
+            UnlockAlarmQueue();
             WaitForSingleObject(s_alarmEvent, INFINITE);
 #else
-            pthread_mutex_lock(&s_alarmMutex);
-            pthread_cond_wait(&s_alarmCond, &s_alarmMutex);
-            pthread_mutex_unlock(&s_alarmMutex);
+            while (s_alarmThreadRunning && s_alarmQueue.head == NULL) {
+                pthread_cond_wait(&s_alarmCond, &s_alarmMutex);
+            }
+            UnlockAlarmQueue();
 #endif
             continue;
         }
@@ -144,38 +212,33 @@ static void* AlarmThreadFunc(void* arg) {
         if (currentTime < alarm->fire) {
             // Sleep until alarm fires
             OSTime sleepTime = alarm->fire - currentTime;
-            UnlockAlarmQueue();
-            
             // Convert to milliseconds for sleep (cap to avoid long blocks / overflow)
             u32 sleepMs = (u32)(sleepTime / (OS_TIMER_CLOCK / 1000));
             if (sleepMs == 0) sleepMs = 1;
             if (sleepMs > 5000) sleepMs = 5000;  /* wake every 5s to re-check; SetEvent can wake earlier */
             
 #ifdef _WIN32
+            UnlockAlarmQueue();
             WaitForSingleObject(s_alarmEvent, sleepMs);
 #else
-            usleep(sleepMs * 1000);
+            struct timespec wakeTime;
+            clock_gettime(CLOCK_REALTIME, &wakeTime);
+            AddMillisecondsToTimespec(&wakeTime, sleepMs);
+            pthread_cond_timedwait(&s_alarmCond, &s_alarmMutex, &wakeTime);
+            UnlockAlarmQueue();
 #endif
             continue;
         }
         
-        // Alarm should fire! Remove from queue
-        s_alarmQueue.head = alarm->next;
-        if (s_alarmQueue.head == NULL) {
-            s_alarmQueue.tail = NULL;
-        } else {
-            s_alarmQueue.head->prev = NULL;
-        }
-        
-        // Get handler before unlocking (alarm might be modified)
+        // Alarm should fire! Capture metadata then remove from queue.
         OSAlarmHandler handler = alarm->handler;
         OSTime period = alarm->period;
         OSTime start = alarm->start;
-        
-        alarm->handler = NULL; // Mark as not in queue
+
+        RemoveAlarmLocked(alarm, TRUE);
         
         // For periodic alarms, calculate next fire time and re-insert
-        if (period > 0) {
+        if (period > 0 && handler) {
             alarm->period = period; // Restore in case it was cleared
             alarm->start = start;
             InsertAlarm(alarm, 0, handler); // InsertAlarm handles periodic calculation
@@ -313,8 +376,12 @@ void OSSetAlarm(OSAlarm* alarm, OSTime tick, OSAlarmHandler handler) {
     }
     
     LockAlarmQueue();
+
+    // Re-arming the same OSAlarm must replace any existing queued instance.
+    RemoveAlarmLocked(alarm, TRUE);
     
     alarm->period = 0; // One-shot alarm
+    alarm->start = 0;
     InsertAlarm(alarm, OSGetTime() + tick, handler);
     
     UnlockAlarmQueue();
@@ -339,8 +406,12 @@ void OSSetAbsAlarm(OSAlarm* alarm, OSTime time, OSAlarmHandler handler) {
     }
     
     LockAlarmQueue();
+
+    // Re-arming the same OSAlarm must replace any existing queued instance.
+    RemoveAlarmLocked(alarm, TRUE);
     
     alarm->period = 0; // One-shot alarm
+    alarm->start = 0;
     InsertAlarm(alarm, time, handler);
     
     UnlockAlarmQueue();
@@ -370,6 +441,9 @@ void OSSetPeriodicAlarm(OSAlarm* alarm, OSTime start, OSTime period,
     }
     
     LockAlarmQueue();
+
+    // Re-arming the same OSAlarm must replace any existing queued instance.
+    RemoveAlarmLocked(alarm, TRUE);
     
     alarm->period = period;
     alarm->start = start;
@@ -392,38 +466,14 @@ void OSCancelAlarm(OSAlarm* alarm) {
     if (!alarm) return;
     
     LockAlarmQueue();
-    
-    // Check if alarm is actually in the queue
-    if (alarm->handler == NULL) {
-        UnlockAlarmQueue();
-        return;
+
+    if (!RemoveAlarmLocked(alarm, TRUE)) {
+        // Not in queue: ensure links are sanitized anyway.
+        alarm->handler = NULL;
+        alarm->prev = NULL;
+        alarm->next = NULL;
     }
-    
-    // Remove from queue
-    OSAlarm* next = alarm->next;
-    
-    if (next == NULL) {
-        s_alarmQueue.tail = alarm->prev;
-    } else {
-        next->prev = alarm->prev;
-    }
-    
-    if (alarm->prev) {
-        alarm->prev->next = next;
-    } else {
-        s_alarmQueue.head = next;
-        // Wake up thread since head changed
-#ifdef _WIN32
-        SetEvent(s_alarmEvent);
-#else
-        pthread_cond_signal(&s_alarmCond);
-#endif
-    }
-    
-    alarm->handler = NULL; // Mark as not in queue
-    alarm->prev = NULL;
-    alarm->next = NULL;
-    
+
     UnlockAlarmQueue();
 }
 
@@ -559,8 +609,7 @@ void* OSGetAlarmUserData(const OSAlarm* alarm) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void OSInitAlarm(void) {
-    /* Alarm system already initialized in OSInit().
-     * This stub exists for API compatibility with modules
-     * that call OSInitAlarm() explicitly (e.g., CARD).
-     */
+    if (!s_alarmSystemInitialized) {
+        InitAlarmSystem();
+    }
 }
