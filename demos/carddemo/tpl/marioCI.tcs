@@ -1,6 +1,0 @@
-path = ./
-file 0 = marioCI.tga
-image    0 =  0, X, CI8
-palette 0 = 0, RGB5A3
-texture 0 = 0, 0
-

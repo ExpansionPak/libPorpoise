@@ -1,4 +1,0 @@
-path = ./
-file 0 = luigi.tga
-image    0 =  0, 0, RGB5A3
-texture 0 = 0, X

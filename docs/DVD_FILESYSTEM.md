@@ -335,7 +335,7 @@ if (DVDOpen("assets/big_texture.tpl", &file)) {
 
 ## See Also
 
-- [QUICKSTART.md](../QUICKSTART.md) - Getting started guide
+- [QUICKSTART.md](root-notes/QUICKSTART.md) - Getting started guide
 - [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) - Module status
 - Example: `examples/dvd_test.c` - Complete working example
 

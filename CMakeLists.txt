@@ -25,12 +25,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Options
-option(PORPOISE_BUILD_EXAMPLES "Build example programs" ON)
+option(PORPOISE_BUILD_EXAMPLES "Build example programs" OFF)
 option(PORPOISE_BUILD_PIKMIN_DEMO "Build the Pikmin demo target" OFF)
 option(PORPOISE_BUILD_SHARED "Build shared library" OFF)
 option(PORPOISE_USE_GECKO_MEMORY "Enable full memory emulation (locked cache support)" OFF)
-option(PORPOISE_USE_RUST_RENDERER "Build and use Rust renderer bridge backend" ON)
-option(PORPOISE_RUST_BRIDGE_ONLY "Disable OpenGL fallback when Rust bridge declines" OFF)
+option(PORPOISE_USE_ACPC_GX "Use ACGC-PC-Port GX backend" ON)
+option(PORPOISE_USE_COOPERATIVE_THREADS "Use cooperative thread scheduler (OSThread.cpp)" OFF)
 
 # Output directories
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -48,8 +48,13 @@ if(SDL2_FOUND)
 else()
     message(WARNING "SDL2 not found via find_package. Trying NuGet package (VS).")
     if(WIN32)
-        # NuGet restores packages under ${CMAKE_BINARY_DIR}/packages
+        # Prefer packages restored under ${CMAKE_BINARY_DIR}/packages, then fall back
+        # to repository-level ${CMAKE_SOURCE_DIR}/packages if present.
         file(GLOB SDL2_NUGET_PACKAGES "${CMAKE_BINARY_DIR}/packages/sdl2.nuget.[0-9]*")
+        list(LENGTH SDL2_NUGET_PACKAGES SDL2_NUGET_COUNT)
+        if(SDL2_NUGET_COUNT EQUAL 0)
+            file(GLOB SDL2_NUGET_PACKAGES "${CMAKE_SOURCE_DIR}/packages/sdl2.nuget.[0-9]*")
+        endif()
         list(LENGTH SDL2_NUGET_PACKAGES SDL2_NUGET_COUNT)
         if(SDL2_NUGET_COUNT GREATER 0)
             list(SORT SDL2_NUGET_PACKAGES)
@@ -97,11 +102,67 @@ endif()
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${SDL2_INCLUDE_DIRS})
 
+# Default to real OS threads for stability across demos and game builds.
+# Cooperative scheduler emulation can deadlock on PC (no real OSLoadContext swap).
+if(PORPOISE_USE_COOPERATIVE_THREADS)
+    set(OS_THREAD_SOURCE src/os/OSThread.cpp)
+    message(WARNING "Using cooperative thread scheduler (OSThread.cpp). This may be unstable on PC.")
+else()
+    set(OS_THREAD_SOURCE src/os/OSThread.c)
+    message(STATUS "Using real OS threads (OSThread.c)")
+endif()
+
+# GX backend source selection
+set(PORPOISE_GX_LEGACY_SOURCES
+    # GX (Graphics) - C++ implementation (Aurora-compatible)
+    src/gx/GXBump.cpp
+    src/gx/GXCull.cpp
+    src/gx/GXDispList.cpp
+    src/gx/GXDraw.cpp
+    src/gx/GXExtra.cpp
+    src/gx/GXFifo.cpp
+    src/gx/GXFrameBuffer.cpp
+    src/gx/GXGeometry.cpp
+    src/gx/GXGet.cpp
+    src/gx/GXLighting.cpp
+    src/gx/GXManage.cpp
+    src/gx/GXPerf.cpp
+    src/gx/GXPixel.cpp
+    src/gx/GXTev.cpp
+    src/gx/GXTexture.cpp
+    src/gx/GXTransform.cpp
+    src/gx/GXVert.cpp
+
+    # GX compatibility layer (legacy Aurora-style renderer)
+    src/gfx/logging.cpp
+    src/gfx/texture.cpp
+    src/gfx/gx_state.cpp
+    src/gfx/common.cpp
+    src/gfx/render.cpp
+)
+
+set(PORPOISE_GX_ACPC_SOURCES
+    # GX backend imported from ACGC-PC-Port
+    src/gx/pc_gx.c
+    src/gx/pc_gx_texture.c
+    src/gx/pc_gx_tev.c
+    src/gx/pc_platform_stub.c
+    src/gx/pc_texture_pack_stub.c
+    src/gx/glad/src/gl.c
+    src/gfx/render_acpc.cpp
+)
+
+if(PORPOISE_USE_ACPC_GX)
+    set(PORPOISE_GX_SOURCES ${PORPOISE_GX_ACPC_SOURCES})
+else()
+    set(PORPOISE_GX_SOURCES ${PORPOISE_GX_LEGACY_SOURCES})
+endif()
+
 # Source files
 set(PORPOISE_SOURCES
     # Core OS
     src/os/OS.c
-    src/os/OSThread.cpp
+    ${OS_THREAD_SOURCE}
     src/os/OSMutex.c
     src/os/OSTime.c
     src/os/OSAlarm.c
@@ -174,32 +235,7 @@ set(PORPOISE_SOURCES
     # MTX (Matrix Math)
     src/mtx/mtx.c
     
-    # GX (Graphics) - C++ implementation (Aurora-compatible)
-    src/gx/GXBump.cpp
-    src/gx/GXCull.cpp
-    src/gx/GXDispList.cpp
-    src/gx/GXDraw.cpp
-    src/gx/GXExtra.cpp
-    src/gx/GXFifo.cpp
-    src/gx/GXFrameBuffer.cpp
-    src/gx/GXGeometry.cpp
-    src/gx/GXGet.cpp
-    src/gx/GXLighting.cpp
-    src/gx/GXManage.cpp
-    src/gx/GXPerf.cpp
-    src/gx/GXPixel.cpp
-    src/gx/GXTev.cpp
-    src/gx/GXTexture.cpp
-    src/gx/GXTransform.cpp
-    src/gx/GXVert.cpp
-    
-    # GX compatibility layer (replacing Aurora dependencies)
-    src/gfx/logging.cpp
-    src/gfx/texture.cpp
-    src/gfx/gx_state.cpp
-    src/gfx/common.cpp
-    src/gfx/render.cpp
-    src/gfx/rust_renderer_bridge.cpp
+    ${PORPOISE_GX_SOURCES}
     
     # Demo Library
     src/demo/DEMOInit.cpp
@@ -208,6 +244,7 @@ set(PORPOISE_SOURCES
     src/demo/DEMOWin.cpp
     src/demo/DEMOStats.cpp
     src/demo/DEMOFont.cpp
+    src/demo/DEMOTpl.c
 )
 
 # Create library - C++ primary, C files compiled as C++
@@ -227,50 +264,19 @@ set_target_properties(porpoise PROPERTIES
     LINKER_LANGUAGE CXX
 )
 
-if(PORPOISE_USE_RUST_RENDERER)
-    find_program(CARGO_EXECUTABLE cargo)
-    if(CARGO_EXECUTABLE)
-        set(PORPOISE_RUST_DIR "${CMAKE_SOURCE_DIR}/rust")
-        set(PORPOISE_RUST_TARGET_DIR "${PORPOISE_RUST_DIR}/target/release")
-        if(WIN32)
-            set(PORPOISE_RUST_LIB_FILE "${PORPOISE_RUST_TARGET_DIR}/porpoise_rust_renderer.dll")
-        elseif(APPLE)
-            set(PORPOISE_RUST_LIB_FILE "${PORPOISE_RUST_TARGET_DIR}/libporpoise_rust_renderer.dylib")
-        else()
-            set(PORPOISE_RUST_LIB_FILE "${PORPOISE_RUST_TARGET_DIR}/libporpoise_rust_renderer.so")
-        endif()
-
-        add_custom_target(porpoise_rust_renderer ALL
-            COMMAND ${CARGO_EXECUTABLE} build --release
-            WORKING_DIRECTORY "${PORPOISE_RUST_DIR}"
-            BYPRODUCTS "${PORPOISE_RUST_LIB_FILE}"
-            COMMENT "Building Rust renderer bridge"
-        )
-        add_dependencies(porpoise porpoise_rust_renderer)
-
-        add_custom_command(TARGET porpoise POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PORPOISE_RUST_LIB_FILE}"
-            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
-            COMMAND ${CMAKE_COMMAND} -E make_directory
-            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PORPOISE_RUST_LIB_FILE}"
-            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>"
-            COMMENT "Copying Rust renderer bridge library"
-        )
-    else()
-        message(WARNING "PORPOISE_USE_RUST_RENDERER is ON but cargo was not found; bridge will fall back to OpenGL path.")
-    endif()
+if(PORPOISE_USE_ACPC_GX)
+    target_include_directories(porpoise PUBLIC
+        ${CMAKE_SOURCE_DIR}/src/gx/glad/include
+    )
+    target_compile_definitions(porpoise PRIVATE
+        PORPOISE_GX_SHADER_DIR="${CMAKE_SOURCE_DIR}/src/gx/shaders"
+        PORPOISE_ACPC_SHADER_DIR="${CMAKE_SOURCE_DIR}/src/gx/shaders"
+    )
 endif()
 
 # Enable full memory emulation if requested
 if(PORPOISE_USE_GECKO_MEMORY)
     target_compile_definitions(porpoise PUBLIC PORPOISE_USE_GECKO_MEMORY)
-endif()
-
-if(PORPOISE_RUST_BRIDGE_ONLY)
-    target_compile_definitions(porpoise PUBLIC PORPOISE_RUST_BRIDGE_ONLY=1)
 endif()
 
 # Find OpenGL (for GX viewport and rendering)
@@ -353,7 +359,11 @@ install(DIRECTORY include/dolphin
 
 # Examples
 if(PORPOISE_BUILD_EXAMPLES)
-    add_subdirectory(examples)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/examples/CMakeLists.txt")
+        add_subdirectory(examples)
+    else()
+        message(WARNING "PORPOISE_BUILD_EXAMPLES is ON but examples/ is missing; skipping examples build.")
+    endif()
 endif()
 
 if(PORPOISE_BUILD_PIKMIN_DEMO)
@@ -368,5 +378,4 @@ message(STATUS "  Library type: ${PORPOISE_BUILD_SHARED}")
 message(STATUS "  Build examples: ${PORPOISE_BUILD_EXAMPLES}")
 message(STATUS "  Build Pikmin demo: ${PORPOISE_BUILD_PIKMIN_DEMO}")
 message(STATUS "  Full memory emulation: ${PORPOISE_USE_GECKO_MEMORY}")
-message(STATUS "  Rust renderer bridge: ${PORPOISE_USE_RUST_RENDERER}")
-message(STATUS "  Rust bridge only mode: ${PORPOISE_RUST_BRIDGE_ONLY}")
+message(STATUS "  GX backend (ACPC): ${PORPOISE_USE_ACPC_GX}")

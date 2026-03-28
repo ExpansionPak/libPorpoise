@@ -1,9 +1,0 @@
-path = ./
-file 0 = bannerc.tga           	      ; this is a 96x32 ci8 image
-
-image    0 =  0, x, CI8               ; use color from file 0, no alpha
-                                      ; convert to CI8 format
-
-palette 0 = 0, RGB5A3
-
-texture 0  =  0, 0                    ; texture 0 uses image 0, palette 0

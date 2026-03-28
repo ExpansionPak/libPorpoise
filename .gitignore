@@ -1,10 +1,33 @@
 # Reference files (not tracked)
+# Keep all third-party/reference drops in /reference to avoid accidental commits.
 reference/
+# Guardrails for common root-level reference drops (if re-extracted at repo root)
+ACGC-PC-Port/
+rvlsdk/
+
+# Demo/game content (contains non-redistributable assets/code)
+demos/
+files/
 
 # Build directories
 build/
+/build_*/
+/build_legacy_check/
+/build_pikmin/
+/build_pikmin_win32/
+/build_gx_examples_win32/
+/build_acpc_examples/
 cmake-build-*/
 out/
+obj/
+lib/x64/
+
+# Per-demo/generated build outputs
+/demos/PikminDemo/CMakeFiles/
+/demos/PikminDemo/Debug/
+/demos/PikminDemo/out/
+/demos/PikminDemo/pikmin_demo.dir/
+/demos/PikminDemo/x64/
 
 # Compiled binaries
 *.exe
@@ -33,10 +56,14 @@ compile_commands.json
 CTestTestfile.cmake
 _deps/
 
+# Package caches / restored dependencies
+packages/
+
 # IDE specific files
 .vscode/
 .vs/
 .idea/
+node_modules/
 *.swp
 *.swo
 *~
@@ -57,6 +84,7 @@ _deps/
 *.tmp
 *.bak
 *.old
+tmp_*
 
 # Runtime generated files
 porpoise_sram.cfg

@@ -33,7 +33,7 @@ libPorpoise/
 
 ## Quick Start
 
-See [QUICKSTART.md](QUICKSTART.md) for detailed build instructions and getting started guide.
+See [QUICKSTART.md](docs/root-notes/QUICKSTART.md) for detailed build instructions and getting started guide.
 
 **TL;DR:**
 ```bash
