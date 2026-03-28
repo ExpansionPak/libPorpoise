@@ -495,7 +495,7 @@ BOOL OSRestoreInterrupts(BOOL level) {
      * PC: Track state only.
      */
     BOOL prev = s_interruptsEnabled;
-    s_interruptsEnabled = level;
+    s_interruptsEnabled = (level != FALSE);
     return prev;
 }
 
