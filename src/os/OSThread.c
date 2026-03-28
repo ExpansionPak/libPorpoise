@@ -198,6 +198,73 @@ static OSSleepQueueState* GetSleepQueueState(OSThreadQueue* queue) {
     return state;
 }
 
+static void RemoveThreadFromQueueUnlocked(OSThreadQueue* queue, OSThread* thread) {
+    if (!queue || !thread || thread->queue != queue) {
+        return;
+    }
+
+    OSThread* prev = thread->link.prev;
+    OSThread* next = thread->link.next;
+
+    if (prev) {
+        prev->link.next = next;
+    } else {
+        queue->head = next;
+    }
+
+    if (next) {
+        next->link.prev = prev;
+    } else {
+        queue->tail = prev;
+    }
+
+    thread->link.prev = NULL;
+    thread->link.next = NULL;
+    thread->queue = NULL;
+}
+
+static void InsertThreadIntoQueueByPriorityUnlocked(OSThreadQueue* queue, OSThread* thread) {
+    if (!queue || !thread) {
+        return;
+    }
+
+    if (thread->queue) {
+        RemoveThreadFromQueueUnlocked(thread->queue, thread);
+    }
+
+    thread->queue = queue;
+    thread->link.prev = NULL;
+    thread->link.next = NULL;
+
+    if (!queue->head) {
+        queue->head = thread;
+        queue->tail = thread;
+        return;
+    }
+
+    /* Lower numeric value = higher priority. Keep FIFO within equal priority. */
+    OSThread* it = queue->head;
+    while (it && it->priority <= thread->priority) {
+        it = it->link.next;
+    }
+
+    if (!it) {
+        thread->link.prev = queue->tail;
+        queue->tail->link.next = thread;
+        queue->tail = thread;
+        return;
+    }
+
+    thread->link.next = it;
+    thread->link.prev = it->link.prev;
+    if (it->link.prev) {
+        it->link.prev->link.next = thread;
+    } else {
+        queue->head = thread;
+    }
+    it->link.prev = thread;
+}
+
 /* Thread wrapper function */
 #ifdef _WIN32
 static DWORD WINAPI ThreadWrapper(LPVOID param) {
@@ -774,22 +841,34 @@ OSPriority OSGetThreadPriority(OSThread* thread) {
  *---------------------------------------------------------------------------*/
 void OSSleepThread(OSThreadQueue* queue) {
     if (!queue) {
+        u32 releasedDepth = __OSSuspendInterruptLockForSleep();
 #ifdef _WIN32
         Sleep(1);
 #else
         usleep(1000);
 #endif
+        __OSResumeInterruptLockAfterSleep(releasedDepth);
         return;
     }
 
     OSSleepQueueState* state = GetSleepQueueState(queue);
     if (!state) {
+        u32 releasedDepth = __OSSuspendInterruptLockForSleep();
 #ifdef _WIN32
         Sleep(1);
 #else
         usleep(1000);
 #endif
+        __OSResumeInterruptLockAfterSleep(releasedDepth);
         return;
+    }
+
+    OSThread* current = OSGetCurrentThread();
+    BOOL enabled = OSDisableInterrupts();
+
+    if (current) {
+        current->state = OS_THREAD_STATE_WAITING;
+        InsertThreadIntoQueueByPriorityUnlocked(queue, current);
     }
 
     /* Avoid lost wakeups by holding the queue mutex before dropping the
@@ -819,6 +898,17 @@ void OSSleepThread(OSThreadQueue* queue) {
 #endif
 
     __OSResumeInterruptLockAfterSleep(releasedDepth);
+
+    if (current) {
+        if (current->queue == queue) {
+            RemoveThreadFromQueueUnlocked(queue, current);
+        }
+        if (current->state != OS_THREAD_STATE_MORIBUND) {
+            current->state = OS_THREAD_STATE_RUNNING;
+        }
+    }
+
+    OSRestoreInterrupts(enabled);
 }
 
 /*---------------------------------------------------------------------------*
@@ -836,6 +926,22 @@ void OSWakeupThread(OSThreadQueue* queue) {
 
     OSSleepQueueState* state = GetSleepQueueState(queue);
     if (!state) return;
+
+    BOOL enabled = OSDisableInterrupts();
+    OSThread* thread = queue->head;
+    while (thread) {
+        OSThread* next = thread->link.next;
+        thread->link.prev = NULL;
+        thread->link.next = NULL;
+        thread->queue = NULL;
+        if (thread->state != OS_THREAD_STATE_MORIBUND) {
+            thread->state = OS_THREAD_STATE_READY;
+        }
+        thread = next;
+    }
+    queue->head = NULL;
+    queue->tail = NULL;
+    OSRestoreInterrupts(enabled);
 
 #ifdef _WIN32
     EnterCriticalSection(&state->mutex);
