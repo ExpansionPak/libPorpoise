@@ -53,6 +53,24 @@ static void* s_mem1ArenaLo = NULL;
 static void* s_mem2ArenaHi = NULL;
 static void* s_mem2ArenaLo = NULL;
 
+static u32 NormalizeArenaAlign(u32 align) {
+    return (align == 0) ? 4u : align;
+}
+
+static uintptr_t AlignUpAddress(uintptr_t value, u32 align) {
+    uintptr_t a = (uintptr_t)align;
+    uintptr_t rem = value % a;
+    if (rem == 0) {
+        return value;
+    }
+    return value + (a - rem);
+}
+
+static uintptr_t AlignDownAddress(uintptr_t value, u32 align) {
+    uintptr_t a = (uintptr_t)align;
+    return value - (value % a);
+}
+
 /*---------------------------------------------------------------------------*
   Name:         OSInit
 
@@ -289,6 +307,60 @@ void  OSSetArenaHi(void* addr) {
 }
 void  OSSetArenaLo(void* addr) { 
     s_arenaLo = addr; 
+}
+
+void* OSAllocFromArenaLo(u32 size, u32 align) {
+    u32 normalizedAlign = NormalizeArenaAlign(align);
+
+    if (!s_arenaLo || !s_arenaHi) {
+        return NULL;
+    }
+
+    uintptr_t lo = (uintptr_t)s_arenaLo;
+    uintptr_t hi = (uintptr_t)s_arenaHi;
+    if (lo > hi) {
+        return NULL;
+    }
+
+    uintptr_t start = AlignUpAddress(lo, normalizedAlign);
+    if (start < lo) {
+        return NULL;
+    }
+
+    if ((uintptr_t)size > (hi - start)) {
+        return NULL;
+    }
+
+    uintptr_t newLo = start + (uintptr_t)size;
+    if (newLo < start || newLo > hi) {
+        return NULL;
+    }
+
+    s_arenaLo = (void*)newLo;
+    return (void*)start;
+}
+
+void* OSAllocFromArenaHi(u32 size, u32 align) {
+    u32 normalizedAlign = NormalizeArenaAlign(align);
+
+    if (!s_arenaLo || !s_arenaHi) {
+        return NULL;
+    }
+
+    uintptr_t lo = (uintptr_t)s_arenaLo;
+    uintptr_t hi = (uintptr_t)s_arenaHi;
+    if (lo > hi || (uintptr_t)size > (hi - lo)) {
+        return NULL;
+    }
+
+    uintptr_t candidate = hi - (uintptr_t)size;
+    uintptr_t newHi = AlignDownAddress(candidate, normalizedAlign);
+    if (newHi > hi || newHi < lo) {
+        return NULL;
+    }
+
+    s_arenaHi = (void*)newHi;
+    return (void*)newHi;
 }
 
 /* MEM1 arena (24MB main RAM) - stubs for compatibility */

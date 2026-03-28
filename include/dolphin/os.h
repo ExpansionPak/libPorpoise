@@ -44,6 +44,8 @@ void* OSGetArenaHi(void);
 void* OSGetArenaLo(void);
 void  OSSetArenaHi(void* addr);
 void  OSSetArenaLo(void* addr);
+void* OSAllocFromArenaHi(u32 size, u32 align);
+void* OSAllocFromArenaLo(u32 size, u32 align);
 
 void* OSGetMEM1ArenaHi(void);
 void* OSGetMEM1ArenaLo(void);
