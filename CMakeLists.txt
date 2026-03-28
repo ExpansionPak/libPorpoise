@@ -31,6 +31,8 @@ option(PORPOISE_BUILD_SHARED "Build shared library" OFF)
 option(PORPOISE_USE_GECKO_MEMORY "Enable full memory emulation (locked cache support)" OFF)
 option(PORPOISE_USE_ACPC_GX "Use ACGC-PC-Port GX backend" ON)
 option(PORPOISE_USE_COOPERATIVE_THREADS "Use cooperative thread scheduler (OSThread.cpp)" OFF)
+set(PORPOISE_GUARD_MODE "LOG_RETURN" CACHE STRING "Runtime guard mode: OFF, LOG_RETURN, PANIC")
+set_property(CACHE PORPOISE_GUARD_MODE PROPERTY STRINGS OFF LOG_RETURN PANIC)
 
 # Output directories
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -179,6 +181,9 @@ set(PORPOISE_SOURCES
     src/os/OSResetSW.c
     src/os/OSRtc.c
     src/os/OSUart.c
+
+    # libPorpoise runtime guards
+    src/porpoise/Guard.c
     
     # OS Init (Startup Entry Points)
     src/os/init/__start.c
@@ -256,6 +261,18 @@ endif()
 
 # Always build the PC-targeted path in our headers/source
 target_compile_definitions(porpoise PUBLIC TARGET_PC=1)
+
+string(TOUPPER "${PORPOISE_GUARD_MODE}" PORPOISE_GUARD_MODE_UPPER)
+if(PORPOISE_GUARD_MODE_UPPER STREQUAL "OFF")
+    set(PORPOISE_GUARD_MODE_VALUE 0)
+elseif(PORPOISE_GUARD_MODE_UPPER STREQUAL "LOG_RETURN")
+    set(PORPOISE_GUARD_MODE_VALUE 1)
+elseif(PORPOISE_GUARD_MODE_UPPER STREQUAL "PANIC")
+    set(PORPOISE_GUARD_MODE_VALUE 2)
+else()
+    message(FATAL_ERROR "Invalid PORPOISE_GUARD_MODE='${PORPOISE_GUARD_MODE}'. Use OFF, LOG_RETURN, or PANIC.")
+endif()
+target_compile_definitions(porpoise PUBLIC PORPOISE_GUARD_MODE=${PORPOISE_GUARD_MODE_VALUE})
 
 # Set library properties - C++ is primary language
 set_target_properties(porpoise PROPERTIES
@@ -379,3 +396,4 @@ message(STATUS "  Build examples: ${PORPOISE_BUILD_EXAMPLES}")
 message(STATUS "  Build Pikmin demo: ${PORPOISE_BUILD_PIKMIN_DEMO}")
 message(STATUS "  Full memory emulation: ${PORPOISE_USE_GECKO_MEMORY}")
 message(STATUS "  GX backend (ACPC): ${PORPOISE_USE_ACPC_GX}")
+message(STATUS "  Guard mode: ${PORPOISE_GUARD_MODE_UPPER}")

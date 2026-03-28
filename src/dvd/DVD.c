@@ -60,6 +60,7 @@
 #include <dolphin/dvd.h>
 #include <dolphin/dvd_internal.h>
 #include <dolphin/os.h>
+#include <dolphin/porpoise/Guard.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -319,9 +320,9 @@ BOOL DVDInit(void) {
   Returns:      TRUE if file opened successfully, FALSE if not found
  *---------------------------------------------------------------------------*/
 BOOL DVDOpen(const char* fileName, DVDFileInfo* fileInfo) {
-    if (!s_initialized || !fileName || !fileInfo) {
-        return FALSE;
-    }
+    PP_GUARD_RET(s_initialized, FALSE, "DVDInit must be called first");
+    PP_GUARD_PTR_RET(fileName, FALSE);
+    PP_GUARD_PTR_RET(fileInfo, FALSE);
     
     // Build full path
     char fullPath[512];
@@ -374,9 +375,8 @@ BOOL DVDOpen(const char* fileName, DVDFileInfo* fileInfo) {
   Returns:      TRUE if closed successfully
  *---------------------------------------------------------------------------*/
 BOOL DVDClose(DVDFileInfo* fileInfo) {
-    if (!fileInfo || !fileInfo->cb) {
-        return FALSE;
-    }
+    PP_GUARD_PTR_RET(fileInfo, FALSE);
+    PP_GUARD_PTR_RET(fileInfo->cb, FALSE);
     
     DVDCommandBlock* cb = fileInfo->cb;
     
@@ -411,10 +411,11 @@ BOOL DVDClose(DVDFileInfo* fileInfo) {
  *---------------------------------------------------------------------------*/
 s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32 prio) {
     (void)prio;  // Priority not used on PC
-    
-    if (!fileInfo || !fileInfo->cb || !addr || length < 0) {
-        return -1;
-    }
+
+    PP_GUARD_PTR_RET(fileInfo, -1);
+    PP_GUARD_PTR_RET(fileInfo->cb, -1);
+    PP_GUARD_PTR_RET(addr, -1);
+    PP_GUARD_NONNEG_RET(length, -1);
     
     DVDCommandBlock* cb = fileInfo->cb;
     if (!cb->file) {
@@ -475,10 +476,11 @@ s32 DVDRead(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset) {
 BOOL DVDReadAsyncPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset,
                       DVDCallback callback, s32 prio) {
     (void)prio;
-    
-    if (!fileInfo || !fileInfo->cb || !addr || length < 0) {
-        return FALSE;
-    }
+
+    PP_GUARD_PTR_RET(fileInfo, FALSE);
+    PP_GUARD_PTR_RET(fileInfo->cb, FALSE);
+    PP_GUARD_PTR_RET(addr, FALSE);
+    PP_GUARD_NONNEG_RET(length, FALSE);
     
     DVDCommandBlock* cb = fileInfo->cb;
     if (!cb->file) {
@@ -541,9 +543,8 @@ BOOL DVDReadAsync(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset,
   Returns:      Current position in file
  *---------------------------------------------------------------------------*/
 s32 DVDSeek(DVDFileInfo* fileInfo, s32 offset) {
-    if (!fileInfo || !fileInfo->cb) {
-        return -1;
-    }
+    PP_GUARD_PTR_RET(fileInfo, -1);
+    PP_GUARD_PTR_RET(fileInfo->cb, -1);
     
     DVDCommandBlock* cb = fileInfo->cb;
     if (!cb->file) {
@@ -567,9 +568,8 @@ s32 DVDSeek(DVDFileInfo* fileInfo, s32 offset) {
   Returns:      DVD_STATE_* constant
  *---------------------------------------------------------------------------*/
 s32 DVDGetFileInfoStatus(const DVDFileInfo* fileInfo) {
-    if (!fileInfo || !fileInfo->cb) {
-        return DVD_STATE_END;
-    }
+    PP_GUARD_PTR_RET(fileInfo, DVD_STATE_END);
+    PP_GUARD_PTR_RET(fileInfo->cb, DVD_STATE_END);
     
     return fileInfo->cb->state;
 }
@@ -588,9 +588,9 @@ s32 DVDGetFileInfoStatus(const DVDFileInfo* fileInfo) {
   Returns:      TRUE if directory opened successfully
  *---------------------------------------------------------------------------*/
 BOOL DVDOpenDir(const char* dirName, DVDDir* dir) {
-    if (!s_initialized || !dirName || !dir) {
-        return FALSE;
-    }
+    PP_GUARD_RET(s_initialized, FALSE, "DVDInit must be called first");
+    PP_GUARD_PTR_RET(dirName, FALSE);
+    PP_GUARD_PTR_RET(dir, FALSE);
     
     // Find free directory state
     int stateIndex = -1;
@@ -656,9 +656,8 @@ BOOL DVDOpenDir(const char* dirName, DVDDir* dir) {
   Returns:      TRUE if entry read, FALSE if end of directory
  *---------------------------------------------------------------------------*/
 BOOL DVDReadDir(DVDDir* dir, DVDDirEntry* dirent) {
-    if (!dir || !dirent) {
-        return FALSE;
-    }
+    PP_GUARD_PTR_RET(dir, FALSE);
+    PP_GUARD_PTR_RET(dirent, FALSE);
     
     int stateIndex = dir->entryNum;
     if (stateIndex < 0 || stateIndex >= MAX_OPEN_DIRS || !s_dirStateUsed[stateIndex]) {
