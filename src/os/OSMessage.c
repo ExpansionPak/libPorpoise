@@ -160,7 +160,7 @@ void OSInitMessageQueue(OSMessageQueue* mq, OSMessage* msgArray, s32 msgCount) {
     
     /* Set up circular buffer */
     mq->msgArray = msgArray;
-    mq->msgCount = msgCount;
+    mq->msgCount = (msgCount > 0) ? msgCount : 0;
     mq->firstIndex = 0;      /* Read position */
     mq->usedCount = 0;       /* Number of messages currently in queue */
 }
@@ -197,7 +197,7 @@ BOOL OSSendMessage(OSMessageQueue* mq, OSMessage msg, s32 flags) {
     BOOL enabled;
     s32 lastIndex;
     
-    if (!mq) return FALSE;
+    if (!mq || !mq->msgArray || mq->msgCount <= 0) return FALSE;
     
     /* Enter critical section */
     enabled = OSDisableInterrupts();
@@ -269,7 +269,7 @@ BOOL OSSendMessage(OSMessageQueue* mq, OSMessage msg, s32 flags) {
 BOOL OSJamMessage(OSMessageQueue* mq, OSMessage msg, s32 flags) {
     BOOL enabled;
     
-    if (!mq) return FALSE;
+    if (!mq || !mq->msgArray || mq->msgCount <= 0) return FALSE;
     
     /* Enter critical section */
     enabled = OSDisableInterrupts();
@@ -347,7 +347,7 @@ BOOL OSJamMessage(OSMessageQueue* mq, OSMessage msg, s32 flags) {
 BOOL OSReceiveMessage(OSMessageQueue* mq, OSMessage* msg, s32 flags) {
     BOOL enabled;
     
-    if (!mq) return FALSE;
+    if (!mq || !mq->msgArray || mq->msgCount <= 0) return FALSE;
     
     /* Enter critical section */
     enabled = OSDisableInterrupts();
