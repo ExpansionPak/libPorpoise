@@ -44,6 +44,8 @@ void GXPosition2s8(s8 x, s8 y);
 
 void GXPosition1x16(u16 index);
 void GXPosition1x8(u8 index);
+void GXMatrixIndex1x8(u8 index);
+void GXMatrixIndex1u8(u8 index);
 
 void GXNormal3f32(f32 x, f32 y, f32 z);
 void GXNormal3s16(s16 x, s16 y, s16 z);

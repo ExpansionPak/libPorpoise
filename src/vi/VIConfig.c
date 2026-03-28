@@ -32,7 +32,7 @@ void VIGetDefaultConfig(VIConfig* config) {
     // Graphics defaults
     config->vsync = 1;              // VSync on by default
     config->fpsCap = 60;            // 60 FPS cap
-    config->msaaSamples = 0;        // No MSAA
+    config->msaaSamples = 4;        // Default 4x MSAA for smoother GX edges
     config->openglMajor = 3;
     config->openglMinor = 3;
     

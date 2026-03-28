@@ -117,9 +117,13 @@ private:
 static std::optional<SStreamState> sStreamState;
 static u16 lastVertexStart = 0;
 
+void GXResetStreamState(void) {
+  sStreamState.reset();
+}
+
 extern "C" {
 void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     const u8 fmtAndPrimitive = vtxFmt | primitive;
     dlBuf->append(fmtAndPrimitive);
     dlBuf->append(nVerts);
@@ -130,7 +134,7 @@ void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
   uint16_t vertexSize = 0;
   uint16_t numDirectAttrs = 0;
   uint16_t numIndexedAttrs = 0;
-  for (GXAttr attr{}; const auto type : g_gxState.vtxDesc) {
+  for (GXAttr attr{}; const auto type : g_gxState().vtxDesc) {
     if (type == GX_DIRECT) {
       ++numDirectAttrs;
       if (attr == GX_VA_POS || attr == GX_VA_NRM) {
@@ -160,8 +164,8 @@ void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
   u32 directOffset = directStart;
   std::vector<Attribute> attrs;
   attrs.reserve(numDirectAttrs + numIndexedAttrs);
-  const auto& curVtxFmt = g_gxState.vtxFmts[vtxFmt];
-  for (GXAttr attr{}; const auto type : g_gxState.vtxDesc) {
+  const auto& curVtxFmt = g_gxState().vtxFmts[vtxFmt];
+  for (GXAttr attr{}; const auto type : g_gxState().vtxDesc) {
     if (type == GX_DIRECT) {
       u32 attrSize;
       if (attr == GX_VA_POS || attr == GX_VA_NRM) {
@@ -184,11 +188,11 @@ void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
 
   CHECK(vertexSize > 0, "no vtx attributes enabled?");
   sStreamState.emplace(primitive, vtxFmt, std::move(attrs), nVerts, vertexSize,
-                       /*g_gxState.stateDirty ? 0 : lastVertexStart*/ 0);
+                       /*g_gxState().stateDirty ? 0 : lastVertexStart*/ 0);
 }
 
 void GXPosition3f32(f32 x, f32 y, f32 z) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(porpoise::Vec3{x, y, z});
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_POS, GX_POS_XYZ, GX_F32);
@@ -199,7 +203,7 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
 }
 
 void GXPosition3u16(u16 x, u16 y, u16 z) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(x);
     dlBuf->append(y);
     dlBuf->append(z);
@@ -216,7 +220,7 @@ void GXPosition3u16(u16 x, u16 y, u16 z) {
 }
 
 void GXPosition3s16(s16 x, s16 y, s16 z) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(x);
     dlBuf->append(y);
     dlBuf->append(z);
@@ -233,7 +237,7 @@ void GXPosition3s16(s16 x, s16 y, s16 z) {
 }
 
 void GXPosition3u8(u8 x, u8 y, u8 z) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(x);
     dlBuf->append(y);
     dlBuf->append(z);
@@ -250,7 +254,7 @@ void GXPosition3u8(u8 x, u8 y, u8 z) {
 }
 
 void GXPosition3s8(s8 x, s8 y, s8 z) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(x);
     dlBuf->append(y);
     dlBuf->append(z);
@@ -267,7 +271,7 @@ void GXPosition3s8(s8 x, s8 y, s8 z) {
 }
 
 void GXPosition2f32(f32 x, f32 y) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(porpoise::Vec2{x, y});
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_POS, GX_POS_XY, GX_F32);
@@ -278,7 +282,7 @@ void GXPosition2f32(f32 x, f32 y) {
 }
 
 void GXPosition2u16(u16 x, u16 y) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(x);
     dlBuf->append(y);
   } else if (auto& stream = sStreamState) {
@@ -294,7 +298,7 @@ void GXPosition2u16(u16 x, u16 y) {
 }
 
 void GXPosition2s16(s16 x, s16 y) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(x);
     dlBuf->append(y);
   } else if (auto& stream = sStreamState) {
@@ -310,7 +314,7 @@ void GXPosition2s16(s16 x, s16 y) {
 }
 
 void GXPosition2u8(u8 x, u8 y) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(x);
     dlBuf->append(y);
   } else if (auto& stream = sStreamState) {
@@ -326,7 +330,7 @@ void GXPosition2u8(u8 x, u8 y) {
 }
 
 void GXPosition2s8(s8 x, s8 y) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(x);
     dlBuf->append(y);
   } else if (auto& stream = sStreamState) {
@@ -342,7 +346,7 @@ void GXPosition2s8(s8 x, s8 y) {
 }
 
 void GXPosition1x16(u16 idx) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(idx);
   } else if (auto& stream = sStreamState) {
     stream->check_indexed(GX_VA_POS, GX_INDEX16);
@@ -353,7 +357,7 @@ void GXPosition1x16(u16 idx) {
 }
 
 void GXPosition1x8(u8 idx) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(idx);
   } else if (auto& stream = sStreamState) {
     stream->check_indexed(GX_VA_POS, GX_INDEX8);
@@ -364,7 +368,7 @@ void GXPosition1x8(u8 idx) {
 }
 
 void GXNormal3f32(f32 x, f32 y, f32 z) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(porpoise::Vec3{x, y, z});
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_NRM, GX_NRM_XYZ, GX_F32);
@@ -375,7 +379,7 @@ void GXNormal3f32(f32 x, f32 y, f32 z) {
 }
 
 void GXNormal3s16(s16 x, s16 y, s16 z) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(x);
     dlBuf->append(y);
     dlBuf->append(z);
@@ -392,7 +396,7 @@ void GXNormal3s16(s16 x, s16 y, s16 z) {
 }
 
 void GXNormal3s8(s8 x, s8 y, s8 z) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(x);
     dlBuf->append(y);
     dlBuf->append(z);
@@ -409,7 +413,7 @@ void GXNormal3s8(s8 x, s8 y, s8 z) {
 }
 
 void GXNormal1x16(u16 index) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(index);
   } else if (auto& stream = sStreamState) {
     stream->check_indexed(GX_VA_NRM, GX_INDEX16);
@@ -420,7 +424,7 @@ void GXNormal1x16(u16 index) {
 }
 
 void GXNormal1x8(u8 index) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(index);
   } else if (auto& stream = sStreamState) {
     stream->check_indexed(GX_VA_POS, GX_INDEX8);
@@ -431,7 +435,7 @@ void GXNormal1x8(u8 index) {
 }
 
 void GXColor4f32(f32 r, f32 g, f32 b, f32 a) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(porpoise::Vec4{r, g, b, a});
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8);
@@ -442,7 +446,7 @@ void GXColor4f32(f32 r, f32 g, f32 b, f32 a) {
 }
 
 void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(r);
     dlBuf->append(g);
     dlBuf->append(b);
@@ -461,7 +465,7 @@ void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
 }
 
 void GXColor3u8(u8 r, u8 g, u8 b) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(r);
     dlBuf->append(g);
     dlBuf->append(b);
@@ -479,7 +483,7 @@ void GXColor3u8(u8 r, u8 g, u8 b) {
 }
 
 void GXColor1u32(u32 clr) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(clr);
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8);
@@ -495,7 +499,7 @@ void GXColor1u32(u32 clr) {
 }
 
 void GXColor1u16(u16 clr) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(clr);
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_CLR0, GX_CLR_RGB, GX_RGB565);
@@ -511,7 +515,7 @@ void GXColor1u16(u16 clr) {
 }
 
 void GXColor1x16(u16 index) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(index);
   } else if (auto& stream = sStreamState) {
     stream->check_indexed(GX_VA_CLR0, GX_INDEX16);
@@ -522,7 +526,7 @@ void GXColor1x16(u16 index) {
 }
 
 void GXColor1x8(u8 index) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(index);
   } else if (auto& stream = sStreamState) {
     stream->check_indexed(GX_VA_CLR0, GX_INDEX8);
@@ -533,7 +537,7 @@ void GXColor1x8(u8 index) {
 }
 
 void GXTexCoord2f32(f32 s, f32 t) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(porpoise::Vec2{s, t});
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_TEX0, GX_TEX_ST, GX_F32);
@@ -544,7 +548,7 @@ void GXTexCoord2f32(f32 s, f32 t) {
 }
 
 void GXTexCoord2u16(u16 s, u16 t) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(s);
     dlBuf->append(t);
   } else if (auto& stream = sStreamState) {
@@ -559,7 +563,7 @@ void GXTexCoord2u16(u16 s, u16 t) {
 }
 
 void GXTexCoord2s16(s16 s, s16 t) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(s);
     dlBuf->append(t);
   } else if (auto& stream = sStreamState) {
@@ -574,7 +578,7 @@ void GXTexCoord2s16(s16 s, s16 t) {
 }
 
 void GXTexCoord2u8(u8 s, u8 t) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(s);
     dlBuf->append(t);
   } else if (auto& stream = sStreamState) {
@@ -589,7 +593,7 @@ void GXTexCoord2u8(u8 s, u8 t) {
 }
 
 void GXTexCoord2s8(s8 s, s8 t) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(s);
     dlBuf->append(t);
   } else if (auto& stream = sStreamState) {
@@ -604,7 +608,7 @@ void GXTexCoord2s8(s8 s, s8 t) {
 }
 
 void GXTexCoord1f32(f32 s) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(s);
   } else if (auto& stream = sStreamState) {
     stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_F32);
@@ -615,7 +619,7 @@ void GXTexCoord1f32(f32 s) {
 }
 
 void GXTexCoord1u16(u16 s) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(s);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_U16);
@@ -629,7 +633,7 @@ void GXTexCoord1u16(u16 s) {
 }
 
 void GXTexCoord1s16(s16 s) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(s);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_S16);
@@ -643,7 +647,7 @@ void GXTexCoord1s16(s16 s) {
 }
 
 void GXTexCoord1u8(u8 s) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(s);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_U8);
@@ -657,7 +661,7 @@ void GXTexCoord1u8(u8 s) {
 }
 
 void GXTexCoord1s8(s8 s) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(s);
   } else if (auto& stream = sStreamState) {
     const auto frac = stream->check_direct(GX_VA_TEX0, GX_TEX_S, GX_S8);
@@ -671,7 +675,7 @@ void GXTexCoord1s8(s8 s) {
 }
 
 void GXTexCoord1x16(u16 index) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(index);
   } else if (auto& stream = sStreamState) {
     stream->check_indexed(GX_VA_TEX0, GX_INDEX16);
@@ -682,7 +686,7 @@ void GXTexCoord1x16(u16 index) {
 }
 
 void GXTexCoord1x8(u8 index) {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     dlBuf->append(index);
   } else if (auto& stream = sStreamState) {
     stream->check_indexed(GX_VA_TEX0, GX_INDEX8);
@@ -693,7 +697,7 @@ void GXTexCoord1x8(u8 index) {
 }
 
 void GXEnd() {
-  if (auto& dlBuf = g_gxState.dynamicDlBuf) {
+  if (auto& dlBuf = g_gxState().dynamicDlBuf) {
     // Display list recording - nothing else to do
     return;
   }
@@ -736,8 +740,11 @@ void GXEnd() {
   drawData.indexCount = static_cast<uint32_t>(sStreamState->indices.size());
   drawData.primitive = sStreamState->primitive;
   drawData.vtxFmt = sStreamState->vtxFmt;
-  drawData.dstAlpha = g_gxState.dstAlpha;
-  // For GX_DIRECT, arrays[].stride is not used; use attribute size from format
+  drawData.dstAlpha = g_gxState().dstAlpha;
+  // For GX_DIRECT, vertex buffer is interleaved.
+  // Rust expects: stride = pos_array_stride + color_array_stride, color at offset pos_array_stride.
+  // - pos+color: pos_array_stride = offset to color (12), color_array_stride = 16, stride = 28.
+  // - pos+normal (no color): pos_array_stride = full vertex (24), color_array_stride = 0, stride = 24.
   auto direct_stride = [](GXAttr attr, GXAttrType type) -> u32 {
     if (type != GX_DIRECT) return 0;
     if (attr == GX_VA_POS || attr == GX_VA_NRM) return 12;
@@ -745,36 +752,45 @@ void GXEnd() {
     if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) return 8;
     return 0;
   };
-  drawData.posArrayStride = g_gxState.arrays[GX_VA_POS].stride > 0
-      ? g_gxState.arrays[GX_VA_POS].stride
-      : direct_stride(GX_VA_POS, g_gxState.vtxDesc[GX_VA_POS]);
-  drawData.colorArrayStride = g_gxState.arrays[GX_VA_CLR0].stride > 0
-      ? g_gxState.arrays[GX_VA_CLR0].stride
-      : direct_stride(GX_VA_CLR0, g_gxState.vtxDesc[GX_VA_CLR0]);
+  const u32 clrStride = g_gxState().arrays[GX_VA_CLR0].stride > 0
+      ? g_gxState().arrays[GX_VA_CLR0].stride
+      : direct_stride(GX_VA_CLR0, g_gxState().vtxDesc[GX_VA_CLR0]);
+  drawData.colorArrayStride = clrStride;
+
+  if (g_gxState().arrays[GX_VA_POS].stride > 0) {
+    drawData.posArrayStride = g_gxState().arrays[GX_VA_POS].stride;
+  } else {
+    // Direct: if we have color, pos_array_stride = offset to color; else full vertex
+    if (clrStride > 0) {
+      drawData.posArrayStride = static_cast<u8>(sStreamState->vertexSize - clrStride);
+    } else {
+      drawData.posArrayStride = static_cast<u8>(sStreamState->vertexSize);
+    }
+  }
   for (int i = 0; i < 16; ++i) {
     drawData.modelView[i] = 0.0f;
   }
   drawData.modelView[15] = 1.0f;
-  const auto& pnMtx = g_gxState.pnMtx[g_gxState.currentPnMtx];
+  const auto& pnMtx = g_gxState().pnMtx[g_gxState().currentPnMtx];
   for (int row = 0; row < 3; ++row) {
     for (int col = 0; col < 4; ++col) {
       drawData.modelView[col * 4 + row] = pnMtx.pos(row, col);
     }
   }
   for (int i = 0; i < 16; ++i) {
-    drawData.proj[i] = g_gxState.proj.m[i];
+    drawData.proj[i] = g_gxState().proj.m[i];
   }
-  drawData.viewportLeft = g_gxState.viewportLeft;
-  drawData.viewportTop = g_gxState.viewportTop;
-  drawData.viewportWidth = g_gxState.viewportWidth;
-  drawData.viewportHeight = g_gxState.viewportHeight;
-  drawData.viewportNear = g_gxState.viewportNear;
-  drawData.viewportFar = g_gxState.viewportFar;
-  drawData.scissorLeft = g_gxState.scissorLeft;
-  drawData.scissorTop = g_gxState.scissorTop;
-  drawData.scissorWd = g_gxState.scissorWd;
-  drawData.scissorHt = g_gxState.scissorHt;
-  const auto& chan0 = g_gxState.colorChannelState[0];
+  drawData.viewportLeft = g_gxState().viewportLeft;
+  drawData.viewportTop = g_gxState().viewportTop;
+  drawData.viewportWidth = g_gxState().viewportWidth;
+  drawData.viewportHeight = g_gxState().viewportHeight;
+  drawData.viewportNear = g_gxState().viewportNear;
+  drawData.viewportFar = g_gxState().viewportFar;
+  drawData.scissorLeft = g_gxState().scissorLeft;
+  drawData.scissorTop = g_gxState().scissorTop;
+  drawData.scissorWd = g_gxState().scissorWd;
+  drawData.scissorHt = g_gxState().scissorHt;
+  const auto& chan0 = g_gxState().colorChannelState[0];
   drawData.matColor[0] = chan0.matColor.x();
   drawData.matColor[1] = chan0.matColor.y();
   drawData.matColor[2] = chan0.matColor.z();
@@ -782,7 +798,7 @@ void GXEnd() {
 
   u32 indexedOffset = 0;
   for (GXAttr attr = GX_VA_POS; attr < GX_VA_MAX_ATTR; attr = static_cast<GXAttr>(attr + 1)) {
-    const auto type = g_gxState.vtxDesc[attr];
+    const auto type = g_gxState().vtxDesc[attr];
     if (type != GX_INDEX8 && type != GX_INDEX16) {
       continue;
     }
@@ -802,20 +818,20 @@ void GXEnd() {
   // PHASE 1: Calculate array sizes by scanning vertex buffer for max indices
   // This is a "dummy" pass that doesn't push anything, just calculates sizes
   for (int i = 0; i < GX_VA_MAX_ATTR; ++i) {
-    if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
+    if (g_gxState().vtxDesc[i] != GX_INDEX8 && g_gxState().vtxDesc[i] != GX_INDEX16) {
       continue;
     }
-    auto& array = g_gxState.arrays[i];
+    auto& array = g_gxState().arrays[i];
     if (array.size == 0xFFFFFFFFu && array.data) {
       // Calculate size silently - no logging needed
       // Need to calculate size - scan vertex buffer for max index
-      const GXAttrType indexType = g_gxState.vtxDesc[i];
+      const GXAttrType indexType = g_gxState().vtxDesc[i];
       u32 maxIndex = 0;
       
       // Calculate index stride (offset to this attribute's index in packed stream layout)
       u32 indexStride = 0;
       for (GXAttr a = GX_VA_POS; a < i; a = static_cast<GXAttr>(a + 1)) {
-        const auto t = g_gxState.vtxDesc[a];
+        const auto t = g_gxState().vtxDesc[a];
         if (t == GX_INDEX8 || t == GX_INDEX16) {
           indexStride += 2;
         }
@@ -829,7 +845,7 @@ void GXEnd() {
       
       // Calculate total stride for all indexed attributes
       for (GXAttr a = GX_VA_POS; a < GX_VA_MAX_ATTR; a = static_cast<GXAttr>(a + 1)) {
-        const auto t = g_gxState.vtxDesc[a];
+        const auto t = g_gxState().vtxDesc[a];
         if (t == GX_INDEX8 || t == GX_INDEX16) {
           totalIndexStride += 2;
         }
@@ -863,10 +879,10 @@ void GXEnd() {
   
   // PHASE 2: Push arrays using calculated sizes
   for (int i = 0; i < GX_VA_MAX_ATTR; ++i) {
-    if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
+    if (g_gxState().vtxDesc[i] != GX_INDEX8 && g_gxState().vtxDesc[i] != GX_INDEX16) {
       continue;
     }
-    auto& array = g_gxState.arrays[i];
+    auto& array = g_gxState().arrays[i];
     if (array.cachedRange.size > 0) {
       // Use the currently cached range (like Aurora)
       drawData.arrayRanges[i] = array.cachedRange;
@@ -889,7 +905,6 @@ void GXEnd() {
 
   // Queue the draw command for deferred rendering
   porpoise::gfx::push_draw_command(drawData);
-  porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Draw);
 
   lastVertexStart = sStreamState->vertexStart + sStreamState->vertexCount;
   sStreamState.reset();

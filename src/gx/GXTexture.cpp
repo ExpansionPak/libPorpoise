@@ -6,7 +6,6 @@
 
 namespace {
 inline void notify_texture_state() {
-  porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Texture);
 }
 } // namespace
 
@@ -32,8 +31,8 @@ void GXInitTexObj(GXTexObj* obj_, const void* data, u16 width, u16 height, u32 f
   obj->doEdgeLod = false;
   obj->maxAniso = GX_ANISO_4;
   obj->tlut = GX_TLUT0;
-  const auto it = g_gxState.copyTextures.find(data);
-  if (it != g_gxState.copyTextures.end()) {
+  const auto it = g_gxState().copyTextures.find(data);
+  if (it != g_gxState().copyTextures.end()) {
     obj->ref = it->second;
     obj->dataInvalidated = false;
   } else {
@@ -63,8 +62,8 @@ void GXInitTexObjCI(GXTexObj* obj_, const void* data, u16 width, u16 height, GXC
   obj->biasClamp = false;
   obj->doEdgeLod = false;
   obj->maxAniso = GX_ANISO_4;
-  const auto it = g_gxState.copyTextures.find(data);
-  if (it != g_gxState.copyTextures.end()) {
+  const auto it = g_gxState().copyTextures.find(data);
+  if (it != g_gxState().copyTextures.end()) {
     obj->ref = it->second;
     obj->dataInvalidated = false;
   } else {
@@ -89,8 +88,8 @@ void GXInitTexObjLOD(GXTexObj* obj_, GXTexFilter minFilt, GXTexFilter magFilt, f
 
 void GXInitTexObjData(GXTexObj* obj_, const void* data) {
   auto* obj = reinterpret_cast<GXTexObj_*>(obj_);
-  const auto it = g_gxState.copyTextures.find(data);
-  if (it != g_gxState.copyTextures.end()) {
+  const auto it = g_gxState().copyTextures.find(data);
+  if (it != g_gxState().copyTextures.end()) {
     obj->ref = it->second;
     obj->dataInvalidated = false;
   } else {
@@ -138,8 +137,8 @@ void GXLoadTexObj(GXTexObj* obj_, GXTexMapID id) {
     porpoise::gfx::write_texture(*obj->ref, data);
     obj->dataInvalidated = false;
   }
-  g_gxState.textures[id] = {obj->ref};
-  g_gxState.stateDirty = true; // TODO only if changed?
+  g_gxState().textures[id] = {obj->ref};
+  g_gxState().stateDirty = true; // TODO only if changed?
   notify_texture_state();
 }
 
@@ -177,6 +176,7 @@ u32 GXGetTexBufferSize(u16 width, u16 height, u32 fmt, GXBool mips, u8 maxLod) {
   case GX_TF_Z16:
   case GX_TF_Z24X8:
   case GX_CTF_RA8:
+  case GX_CTF_YUVA8:
   case GX_CTF_RG8:
   case GX_CTF_GB8:
   case GX_CTF_Z16L:
@@ -186,7 +186,7 @@ u32 GXGetTexBufferSize(u16 width, u16 height, u32 fmt, GXBool mips, u8 maxLod) {
   default:
     break;
   }
-  u32 bitSize = fmt == GX_TF_RGBA8 || fmt == GX_TF_Z24X8 ? 64 : 32;
+  u32 bitSize = (fmt == GX_TF_RGBA8 || fmt == GX_TF_Z24X8 || fmt == GX_CTF_YUVA8) ? 64 : 32;
   u32 bufLen = 0;
   if (mips) {
     while (maxLod != 0) {
@@ -235,7 +235,7 @@ void GXInitTlutObj(GXTlutObj* obj_, const void* data, GXTlutFmt format, u16 entr
 }
 
 void GXLoadTlut(const GXTlutObj* obj_, GXTlut idx) {
-  g_gxState.tluts[idx] = *reinterpret_cast<const GXTlutObj_*>(obj_);
+  g_gxState().tluts[idx] = *reinterpret_cast<const GXTlutObj_*>(obj_);
   // TODO stateDirty?
   notify_texture_state();
 }

@@ -45,9 +45,28 @@
 #include <dolphin/os.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+
+/* Store/load 64-bit pointer in gpr[0..1] for PC builds (context.gpr is u32[]) */
+#if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
+#define PLATFORM_PTR_STORE(ctxt, ptr) do { \
+    uintptr_t _p = (uintptr_t)(ptr); \
+    (ctxt)->gpr[0] = (u32)(_p & 0xFFFFFFFFu); \
+    (ctxt)->gpr[1] = (u32)(_p >> 32); \
+} while(0)
+#define PLATFORM_PTR_LOAD(ctxt) ((void*)(uintptr_t)(((uintptr_t)(ctxt)->gpr[1] << 32) | (ctxt)->gpr[0]))
+#define PLATFORM_PTR_IS_NULL(ctxt) ((ctxt)->gpr[0] == 0 && (ctxt)->gpr[1] == 0)
+#define PLATFORM_PTR_CLEAR(ctxt) do { (ctxt)->gpr[0] = 0; (ctxt)->gpr[1] = 0; } while(0)
+#else
+#define PLATFORM_PTR_STORE(ctxt, ptr) ((ctxt)->gpr[0] = (u32)(uintptr_t)(ptr))
+#define PLATFORM_PTR_LOAD(ctxt) ((void*)(uintptr_t)(ctxt)->gpr[0])
+#define PLATFORM_PTR_IS_NULL(ctxt) ((ctxt)->gpr[0] == 0)
+#define PLATFORM_PTR_CLEAR(ctxt) ((ctxt)->gpr[0] = 0)
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
+#include <process.h>
 
 typedef struct PlatformThread {
     HANDLE handle;
@@ -72,6 +91,7 @@ typedef struct PlatformThread {
 
 /* Global thread state */
 static OSThread s_idleThread;
+static OSThread s_mainThread;  /* Represents the main/initial thread */
 static OSThread* s_currentThread = &s_idleThread;
 static OSSwitchThreadCallback s_switchCallback = NULL;
 
@@ -79,7 +99,7 @@ static OSSwitchThreadCallback s_switchCallback = NULL;
 #ifdef _WIN32
 static DWORD WINAPI ThreadWrapper(LPVOID param) {
     OSThread* thread = (OSThread*)param;
-    PlatformThread* platform = (PlatformThread*)thread->context.gpr[0];
+    PlatformThread* platform = (PlatformThread*)PLATFORM_PTR_LOAD(&thread->context);
     void* result = NULL;
     
     /* Set this thread as current for this platform thread */
@@ -97,7 +117,7 @@ static DWORD WINAPI ThreadWrapper(LPVOID param) {
 #else
 static void* ThreadWrapper(void* param) {
     OSThread* thread = (OSThread*)param;
-    PlatformThread* platform = (PlatformThread*)thread->context.gpr[0];
+    PlatformThread* platform = (PlatformThread*)PLATFORM_PTR_LOAD(&thread->context);
     void* result = NULL;
     
     /* Set this thread as current for this platform thread */
@@ -113,6 +133,31 @@ static void* ThreadWrapper(void* param) {
     return result;
 }
 #endif
+
+/*---------------------------------------------------------------------------*
+  Name:         __OSThreadInit
+
+  Description:  Initializes thread system. Called by OSInit().
+                Sets up the main thread so OSGetCurrentThread() returns
+                a valid thread for the initial execution context.
+
+  Arguments:    None
+ *---------------------------------------------------------------------------*/
+void __OSThreadInit(void) {
+    memset(&s_mainThread, 0, sizeof(s_mainThread));
+    s_mainThread.state = OS_THREAD_STATE_RUNNING;
+    s_mainThread.attr = OS_THREAD_ATTR_DETACH;
+    s_mainThread.priority = 16;
+    s_mainThread.base = 16;
+    s_mainThread.suspend = 0;
+    s_mainThread.val = (void*)(uintptr_t)-1;
+    s_mainThread.mutex = NULL;
+    OSInitThreadQueue(&s_mainThread.queueJoin);
+    s_mainThread.queue = NULL;
+    s_mainThread.queueMutex.head = NULL;
+    s_mainThread.queueMutex.tail = NULL;
+    s_currentThread = &s_mainThread;
+}
 
 /*---------------------------------------------------------------------------*
   Name:         OSInitThreadQueue
@@ -302,8 +347,8 @@ BOOL OSCreateThread(OSThread* thread, void* (*func)(void*), void* param,
     platform->osThread = thread;
     platform->handle = 0;
     
-    /* Store platform data in context (hack: use gpr[0]) */
-    thread->context.gpr[0] = (u32)platform;
+    /* Store platform data in context (hack: use gpr[0..1] on 64-bit) */
+    PLATFORM_PTR_STORE(&thread->context, platform);
     
     /* Mark stack with magic value for debugging */
     if (stack && stackSize >= 4) {
@@ -351,9 +396,9 @@ void OSExitThread(void* val) {
   Arguments:    thread - Thread to cancel
  *---------------------------------------------------------------------------*/
 void OSCancelThread(OSThread* thread) {
-    if (!thread || !thread->context.gpr[0]) return;
+    if (!thread || PLATFORM_PTR_IS_NULL(&thread->context)) return;
     
-    PlatformThread* platform = (PlatformThread*)thread->context.gpr[0];
+    PlatformThread* platform = (PlatformThread*)PLATFORM_PTR_LOAD(&thread->context);
     
 #ifdef _WIN32
     if (platform->handle) {
@@ -370,7 +415,7 @@ void OSCancelThread(OSThread* thread) {
     
     thread->state = OS_THREAD_STATE_MORIBUND;
     free(platform);
-    thread->context.gpr[0] = 0;
+    PLATFORM_PTR_CLEAR(&thread->context);
 }
 
 /*---------------------------------------------------------------------------*
@@ -400,8 +445,8 @@ BOOL OSJoinThread(OSThread* thread, void** val) {
     }
     
     /* Clean up platform thread handle */
-    if (thread->context.gpr[0]) {
-        PlatformThread* platform = (PlatformThread*)thread->context.gpr[0];
+    if (!PLATFORM_PTR_IS_NULL(&thread->context)) {
+        PlatformThread* platform = (PlatformThread*)PLATFORM_PTR_LOAD(&thread->context);
         
 #ifdef _WIN32
         if (platform->handle) {
@@ -433,8 +478,8 @@ void OSDetachThread(OSThread* thread) {
     thread->attr |= OS_THREAD_ATTR_DETACH;
     
     /* Detach platform thread */
-    if (thread->context.gpr[0]) {
-        PlatformThread* platform = (PlatformThread*)thread->context.gpr[0];
+    if (!PLATFORM_PTR_IS_NULL(&thread->context)) {
+        PlatformThread* platform = (PlatformThread*)PLATFORM_PTR_LOAD(&thread->context);
         
 #ifndef _WIN32
         if (platform->handle) {
@@ -473,7 +518,7 @@ s32 OSResumeThread(OSThread* thread) {
     
     /* If suspend count reaches 0 and thread is ready, start it */
     if (thread->suspend == 0 && thread->state == OS_THREAD_STATE_READY) {
-        PlatformThread* platform = (PlatformThread*)thread->context.gpr[0];
+        PlatformThread* platform = (PlatformThread*)PLATFORM_PTR_LOAD(&thread->context);
         if (platform) {
 #ifdef _WIN32
             /* Map priority (0=highest to 31=lowest → Win32 priorities) */
@@ -486,7 +531,7 @@ s32 OSResumeThread(OSThread* thread) {
                 winPriority = THREAD_PRIORITY_BELOW_NORMAL;
             }
             
-            platform->handle = CreateThread(NULL, 0, ThreadWrapper, thread, 0, &platform->threadId);
+            platform->handle = (HANDLE)(uintptr_t)_beginthreadex(NULL, 0, (unsigned int (__stdcall *)(void *))ThreadWrapper, thread, 0, (unsigned int *)&platform->threadId);
             if (platform->handle != NULL) {
                 SetThreadPriority(platform->handle, winPriority);
                 thread->state = OS_THREAD_STATE_RUNNING;
@@ -551,8 +596,8 @@ BOOL OSSetThreadPriority(OSThread* thread, OSPriority priority) {
     thread->priority = priority;
     
     /* Update OS thread priority if running */
-    if (thread->state == OS_THREAD_STATE_RUNNING && thread->context.gpr[0]) {
-        PlatformThread* platform = (PlatformThread*)thread->context.gpr[0];
+    if (thread->state == OS_THREAD_STATE_RUNNING && !PLATFORM_PTR_IS_NULL(&thread->context)) {
+        PlatformThread* platform = (PlatformThread*)PLATFORM_PTR_LOAD(&thread->context);
         
 #ifdef _WIN32
         if (platform->handle) {

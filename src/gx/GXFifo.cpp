@@ -50,6 +50,9 @@ void GXSaveCPUFifo(GXFifoObj* fifo) {}
 OSThread* GXSetCurrentGXThread(void) {
   OSThread* previous = s_currentGXThread;
   s_currentGXThread = OSGetCurrentThread();
+  /* Clear any incomplete stream from the previous GX thread to avoid
+     "Stream began twice" when a thread exits/cancels without GXEnd. */
+  GXResetStreamState();
   return previous;
 }
 

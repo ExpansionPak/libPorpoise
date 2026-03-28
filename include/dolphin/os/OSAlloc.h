@@ -2,6 +2,7 @@
 #define DOLPHIN_OSALLOC_H
 
 #include <dolphin/types.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -11,6 +12,7 @@ typedef int  OSHeapHandle;
 typedef void (*OSAllocVisitor)(void* obj, u32 size);
 
 void*        OSInitAlloc       (void* arenaStart, void* arenaEnd, int maxHeaps);
+void*        OSAllocLow4GB     (size_t size);  /* Allocate block in lower 4GB for u32-ptr games */
 OSHeapHandle OSCreateHeap      (void* start, void* end);
 void         OSDestroyHeap     (OSHeapHandle heap);
 void         OSAddToHeap       (OSHeapHandle heap, void* start, void* end);

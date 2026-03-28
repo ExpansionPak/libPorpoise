@@ -18,9 +18,11 @@
 #include <cstdlib>
 
 #ifdef _WIN32
+#include <windows.h>
 #include <intrin.h>
 #else
 #include <climits>
+#include <unistd.h>
 #endif
 
 #ifdef __cplusplus
@@ -78,7 +80,11 @@ static OSThread      IdleThread;
 static OSThread      DefaultThread;
 static OSContext     IdleContext;
 
-static OSSwitchThreadCallback SwitchThreadCallback = nullptr;
+// Forward declaration: must be before SwitchThreadCallback init (used as default callback)
+static void DefaultSwitchThreadCallback(OSThread* from, OSThread* to);
+
+/* Must be DefaultSwitchThreadCallback; nullptr causes crash when OSSetCurrentThread invokes it before OSSetSwitchThreadCallback */
+static OSSwitchThreadCallback SwitchThreadCallback = DefaultSwitchThreadCallback;
 
 // Global thread variables (these would be in low memory on original hardware)
 OSThread*            __OSCurrentThread = nullptr;
@@ -87,7 +93,6 @@ volatile OSContext*  __OSCurrentContext = nullptr;
 volatile OSContext*  __OSFPUContext = nullptr;
 
 // Forward declarations for internal functions
-static void DefaultSwitchThreadCallback(OSThread* from, OSThread* to);
 static BOOL __OSIsThreadActive(OSThread* thread);
 static void SetRun(OSThread* thread);
 static void UnsetRun(OSThread* thread);
@@ -416,7 +421,11 @@ static OSThread* SelectThread(BOOL yield) {
         do {
             OSEnableInterrupts();
             while (RunQueueBits == 0) {
-                // Busy wait - on PC this could sleep
+#ifdef _WIN32
+                Sleep(1);  /* Yield CPU; cooperative scheduler has no other threads to run */
+#else
+                usleep(1000);
+#endif
             }
             OSDisableInterrupts();
         } while (RunQueueBits == 0);
@@ -485,18 +494,21 @@ BOOL OSCreateThread(
     OSInitThreadQueue(&thread->queueJoin);
     OSInitMutexQueue(&thread->queueMutex);
     
-    sp = (u32)(uintptr_t)stack;
-    sp = TRUNC(sp, ALIGNMENT);
-    sp -= ALIGNMENT;
-    ((u32*)sp)[0] = 0;  // stack back trace
-    ((u32*)sp)[1] = 0;  // LR save area
+    {
+        uintptr_t sp_addr = (uintptr_t)stack;
+        sp_addr &= ~(ALIGNMENT - 1);
+        sp_addr -= ALIGNMENT;
+        ((u32*)sp_addr)[0] = 0;  // stack back trace
+        ((u32*)sp_addr)[1] = 0;  // LR save area
+        sp = (u32)sp_addr;  // truncated for OSInitContext (PowerPC u32 ABI)
+    }
     OSInitContext(&thread->context, (u32)(uintptr_t)func, sp);
     thread->context.lr = (u32)(uintptr_t)OSExitThread;
     thread->context.gpr[3] = (u32)(uintptr_t)param;
     thread->stackBase = (u8*)stack;
-    thread->stackEnd = (u32*)((u32)(uintptr_t)stack - stackSize);
+    thread->stackEnd = (u32*)((char*)stack - stackSize);
     
-    // write magic value into end of stack
+    // write magic value into end of stack (use real pointer, not truncated)
     *(thread->stackEnd) = OS_THREAD_STACK_MAGIC;
     
     thread->error = 0;

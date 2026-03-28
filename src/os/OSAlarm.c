@@ -146,9 +146,10 @@ static void* AlarmThreadFunc(void* arg) {
             OSTime sleepTime = alarm->fire - currentTime;
             UnlockAlarmQueue();
             
-            // Convert to milliseconds for sleep
+            // Convert to milliseconds for sleep (cap to avoid long blocks / overflow)
             u32 sleepMs = (u32)(sleepTime / (OS_TIMER_CLOCK / 1000));
             if (sleepMs == 0) sleepMs = 1;
+            if (sleepMs > 5000) sleepMs = 5000;  /* wake every 5s to re-check; SetEvent can wake earlier */
             
 #ifdef _WIN32
             WaitForSingleObject(s_alarmEvent, sleepMs);

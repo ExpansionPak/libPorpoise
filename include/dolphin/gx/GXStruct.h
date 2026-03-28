@@ -42,8 +42,8 @@ typedef struct {
 } GXColorS10;
 
 #ifdef TARGET_PC
-#define GX_TEXOBJ_DWORDS 16
-#define GX_TLUTOBJ_DWORDS 3
+#define GX_TEXOBJ_DWORDS 22
+#define GX_TLUTOBJ_DWORDS 4
 #define GX_LIGHTOBJ_DWORDS 16
 #define GX_TEXREGION_DWORDS 8
 #else

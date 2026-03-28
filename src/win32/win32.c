@@ -381,41 +381,41 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 					break;
 				// Digital Pad
 				case 'J':
-					winKey.button &= !WINKEY_PAD_BUTTON_LEFT;
+					winKey.button &= ~WINKEY_PAD_BUTTON_LEFT;
 					break;
 				case 'L':
-					winKey.button &= !WINKEY_PAD_BUTTON_RIGHT;
+					winKey.button &= ~WINKEY_PAD_BUTTON_RIGHT;
 					break;
 				case 'I':
-					winKey.button &= !WINKEY_PAD_BUTTON_UP;
+					winKey.button &= ~WINKEY_PAD_BUTTON_UP;
 					break;
 				case 'K':
-					winKey.button &= !WINKEY_PAD_BUTTON_DOWN;
+					winKey.button &= ~WINKEY_PAD_BUTTON_DOWN;
 					break;
 				// Buttons
 				case VK_NUMPAD2:
-					winKey.button &= !WINKEY_PAD_BUTTON_A;
+					winKey.button &= ~WINKEY_PAD_BUTTON_A;
 					break;
 				case VK_NUMPAD4:
-					winKey.button &= !WINKEY_PAD_BUTTON_B;
+					winKey.button &= ~WINKEY_PAD_BUTTON_B;
 					break;
 				case VK_NUMPAD5:
-					winKey.button &= !WINKEY_PAD_TRIGGER_Z;
+					winKey.button &= ~WINKEY_PAD_TRIGGER_Z;
 					break;
 				case VK_NUMPAD6:
-					winKey.button &= !WINKEY_PAD_BUTTON_X;
+					winKey.button &= ~WINKEY_PAD_BUTTON_X;
 					break;
 				case VK_NUMPAD8:
-					winKey.button &= !WINKEY_PAD_BUTTON_Y;
+					winKey.button &= ~WINKEY_PAD_BUTTON_Y;
 					break;
 				case VK_NUMPAD7:
-					winKey.button &= !WINKEY_PAD_TRIGGER_L;
+					winKey.button &= ~WINKEY_PAD_TRIGGER_L;
 					break;
 				case VK_NUMPAD9:
-					winKey.button &= !WINKEY_PAD_TRIGGER_R;
+					winKey.button &= ~WINKEY_PAD_TRIGGER_R;
 					break;
 				case VK_NUMPAD0:
-					winKey.button &= !WINKEY_PAD_BUTTON_MENU;
+					winKey.button &= ~WINKEY_PAD_BUTTON_MENU;
 					break;
 				// Trigger
 				case VK_NUMPAD1:

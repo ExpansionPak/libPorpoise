@@ -109,9 +109,14 @@ void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority,
     request->callback = callback;
     request->next = NULL;
     
-    // On PC, execute immediately (no real queue needed)
-    // DMA is instant memcpy
-    ARStartDMA(type, source, dest, length);
+    // On PC, execute immediately (no real queue needed).
+    // ARStartDMA expects (mainmemAddr, aramAddr), so ARAM->MRAM
+    // requests must swap source/dest when forwarding.
+    if (type == AR_MRAM_TO_ARAM) {
+        ARStartDMA(type, source, dest, length);
+    } else {
+        ARStartDMA(type, dest, source, length);
+    }
     
     // Call callback
     if (callback) {

@@ -24,6 +24,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+/* NtAllocateVirtualMemory: allocate in lower 4GB via ZeroBits (ntdll) */
+typedef long NTSTATUS;
+#define STATUS_SUCCESS ((NTSTATUS)0)
+static NTSTATUS (NTAPI *pNtAllocateVirtualMemory)(HANDLE, void**, unsigned long long, size_t*, unsigned long, unsigned long);
+#endif
+
 /* Alignment and sizing macros */
 #define OFFSET(n, a)    (((u32)(n)) & ((a) - 1))
 #define TRUNC(n, a)     (((u32)(n)) & ~((a) - 1))
@@ -203,17 +213,68 @@ void* OSInitAlloc(void* arenaStart, void* arenaEnd, int maxHeaps) {
     
     OSReport("OSInitAlloc: start=%p end=%p maxHeaps=%d\n", arenaStart, arenaEnd, maxHeaps);
     
-    // WORKAROUND: If pointers are NULL, allocate a default arena using malloc
-    // On PC, we don't pre-allocate arenas, so we allocate on demand
+    // WORKAROUND: If pointers are NULL, allocate a default arena
+    // On PC, we don't pre-allocate arenas, so we allocate on demand.
+    // Games like Pikmin use u32 for heap addresses; on x64 we must allocate
+    // in the lower 4GB so pointer truncation yields valid addresses.
     if (arenaStart == NULL || arenaEnd == NULL) {
-        // Allocate a default 24MB arena (like MEM1 size)
         u32 defaultSize = 24 * 1024 * 1024;
-        arenaStart = malloc(defaultSize);
+        int needLow4GB = 0;
+#if defined(_M_X64) || defined(__x86_64__)
+        needLow4GB = 1;
+#endif
+        arenaStart = NULL;
+#ifdef _WIN32
+        if (needLow4GB) {
+            /* Try VirtualAlloc at fixed low addresses - must succeed for u32 truncation.
+             * Games like Pikmin use u32 for heap addresses; arena must be in lower 4GB. */
+            static const unsigned long lowAddrs[] = {
+                0x10000000ul, 0x11000000ul, 0x12000000ul, 0x13000000ul, 0x14000000ul,
+                0x20000000ul, 0x21000000ul, 0x30000000ul, 0x40000000ul, 0x50000000ul
+            };
+            int i, n = (int)(sizeof(lowAddrs) / sizeof(lowAddrs[0]));
+            for (i = 0; i < n; i++) {
+                void* p = VirtualAlloc((void*)lowAddrs[i], defaultSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                if (p != NULL) {
+                    arenaStart = p;
+                    break;
+                }
+            }
+            if (arenaStart == NULL) {
+                /* Fallback: NtAllocateVirtualMemory with ZeroBits to request lower 4GB */
+                if (!pNtAllocateVirtualMemory) {
+                    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+                    if (ntdll) {
+                        pNtAllocateVirtualMemory = (void*)GetProcAddress(ntdll, "NtAllocateVirtualMemory");
+                    }
+                }
+                if (pNtAllocateVirtualMemory) {
+                    void* baseAddr = NULL;
+                    size_t regionSize = defaultSize;
+                    NTSTATUS st = pNtAllocateVirtualMemory(GetCurrentProcess(), &baseAddr, 32,
+                        &regionSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                    if (st == STATUS_SUCCESS && baseAddr != NULL && (size_t)baseAddr < 0x100000000ULL) {
+                        arenaStart = baseAddr;
+                    }
+                }
+            }
+        }
+#endif
+        if (arenaStart == NULL) {
+            arenaStart = malloc(defaultSize);
+        }
         if (arenaStart == NULL) {
             OSPanic(__FILE__, __LINE__, "OSInitAlloc: Failed to allocate default arena");
         }
+        if (needLow4GB && (size_t)arenaStart > 0xFFFFFFFFu) {
+            OSPanic(__FILE__, __LINE__,
+                "OSInitAlloc: Arena at %p is outside lower 4GB; games using u32 pointers will crash. "
+                "Try building for 32-bit or ensure low-memory allocation succeeds.", arenaStart);
+        }
         arenaEnd = (u8*)arenaStart + defaultSize;
-        OSReport("OSInitAlloc: NULL pointers detected, allocated %u bytes\n", defaultSize);
+        OSSetArenaLo(arenaStart);
+        OSSetArenaHi(arenaEnd);
+        OSReport("OSInitAlloc: NULL pointers detected, allocated %u bytes at %p\n", defaultSize, arenaStart);
     }
     
     if (maxHeaps <= 0) {
@@ -252,6 +313,35 @@ void* OSInitAlloc(void* arenaStart, void* arenaEnd, int maxHeaps) {
     }
     
     return arenaStart;
+}
+
+/*---------------------------------------------------------------------------*
+  Name:         OSAllocLow4GB
+
+  Description:  Allocates a block in the lower 4GB. For games that use u32
+                for pointers, the arena must be in 0x00000000-0xFFFFFFFF.
+                Returns NULL on failure.
+
+  Arguments:    size - Bytes to allocate
+
+  Returns:      Pointer to allocated block, or NULL
+ *---------------------------------------------------------------------------*/
+void* OSAllocLow4GB(size_t size) {
+#ifdef _WIN32
+#if defined(_M_X64) || defined(__x86_64__)
+    static const unsigned long addrs[] = { 0x10000000ul, 0x20000000ul, 0x30000000ul, 0x40000000ul };
+    int i, n = (int)(sizeof(addrs) / sizeof(addrs[0]));
+    for (i = 0; i < n; i++) {
+        void* p = VirtualAlloc((void*)addrs[i], size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (p != NULL) return p;
+    }
+    return NULL;
+#else
+    return malloc(size);
+#endif
+#else
+    return malloc(size);
+#endif
 }
 
 /*---------------------------------------------------------------------------*
@@ -448,6 +538,41 @@ OSHeapHandle OSSetCurrentHeap(OSHeapHandle heap) {
 }
 
 /*---------------------------------------------------------------------------*
+  Name:         OSEnsureDefaultHeap
+
+  Description:  Lazily initialize a default heap for titles/demos that use
+                OSAlloc() without explicit OSInitAlloc()/OSCreateHeap setup.
+
+  Returns:      TRUE if a usable current heap is available.
+ *---------------------------------------------------------------------------*/
+static BOOL OSEnsureDefaultHeap(void) {
+    if (!s_heapArray) {
+        void* start = OSInitAlloc(NULL, NULL, 1);
+        OSHeapHandle heap = OSCreateHeap(start, OSGetArenaHi());
+        if (heap < 0) {
+            return FALSE;
+        }
+        __OSCurrHeap = heap;
+        OSReport("OSAlloc: Auto-initialized default heap %d (%p..%p)\n",
+                 heap, start, OSGetArenaHi());
+    }
+
+    if (__OSCurrHeap >= 0 && __OSCurrHeap < s_numHeaps &&
+        s_heapArray[__OSCurrHeap].size >= 0) {
+        return TRUE;
+    }
+
+    for (OSHeapHandle i = 0; i < s_numHeaps; ++i) {
+        if (s_heapArray[i].size >= 0) {
+            __OSCurrHeap = i;
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+/*---------------------------------------------------------------------------*
   Name:         OSAllocFromHeap
 
   Description:  Allocates memory from the specified heap using first-fit
@@ -463,12 +588,18 @@ OSHeapHandle OSSetCurrentHeap(OSHeapHandle heap) {
   Returns:      Pointer to allocated memory, or NULL if out of memory
  *---------------------------------------------------------------------------*/
 void* OSAllocFromHeap(OSHeapHandle heap, u32 size) {
-    if (!s_heapArray) {
-        OSPanic(__FILE__, __LINE__, "OSAllocFromHeap: No heaps initialized");
+    if (!s_heapArray || __OSCurrHeap < 0) {
+        if (!OSEnsureDefaultHeap()) {
+            OSPanic(__FILE__, __LINE__, "OSAllocFromHeap: No heaps initialized");
+        }
     }
     
     if ((long)size <= 0) {
         OSPanic(__FILE__, __LINE__, "OSAllocFromHeap: Invalid size");
+    }
+
+    if (heap < 0) {
+        heap = __OSCurrHeap;
     }
     
     if (heap < 0 || heap >= s_numHeaps) {

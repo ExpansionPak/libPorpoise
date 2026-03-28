@@ -9,6 +9,12 @@ extern "C" {
 
 void GXDrawSphere(u8 numMajor, u8 numMinor);
 void GXDrawSphere1(u8 depth);
+void GXDrawCylinder(u8 numEdges);
+void GXDrawTorus(f32 rc, u8 numc, u8 numt);
+void GXDrawCube(void);
+void GXDrawDodeca(void);
+void GXDrawOctahedron(void);
+void GXDrawIcosahedron(void);
 
 #ifdef __cplusplus
 }

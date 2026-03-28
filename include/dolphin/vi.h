@@ -290,6 +290,14 @@ void VIMakeContextCurrent(void);
  */
 void VISwapBuffers(void);
 
+/**
+ * @brief Query whether rendering should be temporarily suspended (PC-specific).
+ *
+ * Returns TRUE when the window is minimized/hidden or not focused, which is
+ * useful to avoid unstable driver behavior while tabbed away.
+ */
+BOOL VIIsRenderSuspended(void);
+
 /*---------------------------------------------------------------------------*
     Internal Functions
  *---------------------------------------------------------------------------*/
@@ -315,4 +323,3 @@ BOOL __VIResetDev9Idle(void);
 #endif
 
 #endif // DOLPHIN_VI_H
-

@@ -1,29 +1,29 @@
 #include "gx.hpp"
 
 extern "C" {
-void GXSetNumIndStages(u8 num) { update_gx_state(g_gxState.numIndStages, num); }
+void GXSetNumIndStages(u8 num) { update_gx_state(g_gxState().numIndStages, num); }
 
 void GXSetIndTexOrder(GXIndTexStageID indStage, GXTexCoordID texCoord, GXTexMapID texMap) {
-  auto& stage = g_gxState.indStages[indStage];
+  auto& stage = g_gxState().indStages[indStage];
   update_gx_state(stage.texCoordId, texCoord);
   update_gx_state(stage.texMapId, texMap);
 }
 
 void GXSetIndTexCoordScale(GXIndTexStageID indStage, GXIndTexScale scaleS, GXIndTexScale scaleT) {
-  auto& stage = g_gxState.indStages[indStage];
+  auto& stage = g_gxState().indStages[indStage];
   update_gx_state(stage.scaleS, scaleS);
   update_gx_state(stage.scaleT, scaleT);
 }
 
 void GXSetIndTexMtx(GXIndTexMtxID id, const void* offset, s8 scaleExp) {
   CHECK(id >= GX_ITM_0 && id <= GX_ITM_2, "invalid ind tex mtx ID {}", static_cast<int>(id));
-  update_gx_state(g_gxState.indTexMtxs[id - 1], {*reinterpret_cast<const porpoise::Mat3x2<float>*>(offset), scaleExp});
+  update_gx_state(g_gxState().indTexMtxs[id - 1], {*reinterpret_cast<const porpoise::Mat3x2<float>*>(offset), scaleExp});
 }
 
 void GXSetTevIndirect(GXTevStageID tevStage, GXIndTexStageID indStage, GXIndTexFormat fmt, GXIndTexBiasSel biasSel,
                       GXIndTexMtxID matrixSel, GXIndTexWrap wrapS, GXIndTexWrap wrapT, GXBool addPrev, GXBool indLod,
                       GXIndTexAlphaSel alphaSel) {
-  auto& stage = g_gxState.tevStages[tevStage];
+  auto& stage = g_gxState().tevStages[tevStage];
   update_gx_state(stage.indTexStage, indStage);
   update_gx_state(stage.indTexFormat, fmt);
   update_gx_state(stage.indTexBiasSel, biasSel);
@@ -36,7 +36,7 @@ void GXSetTevIndirect(GXTevStageID tevStage, GXIndTexStageID indStage, GXIndTexF
 }
 
 void GXSetTevDirect(GXTevStageID stageId) {
-  auto& stage = g_gxState.tevStages[stageId];
+  auto& stage = g_gxState().tevStages[stageId];
   // TODO is this right?
   update_gx_state(stage.indTexStage, GX_INDTEXSTAGE0);
   update_gx_state(stage.indTexFormat, GX_ITF_8);

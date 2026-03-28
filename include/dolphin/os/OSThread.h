@@ -2,6 +2,7 @@
 #define DOLPHIN_OSTHREAD_H
 
 #include <dolphin/types.h>
+#include <dolphin/os/OSTime.h>
 #include <dolphin/os/OSContext.h>
 
 #ifdef __cplusplus

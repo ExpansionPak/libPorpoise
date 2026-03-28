@@ -24,6 +24,7 @@ extern "C" {
 #include <dolphin/vi.h>
 #include <dolphin/mtx.h>
 #include <dolphin/gx.h>
+#include <dolphin/tpl.h>
 
 /* Demo library components */
 #include <dolphin/demo/DEMOInit.h>

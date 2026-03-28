@@ -10,8 +10,31 @@ extern "C" {
 // TODO GXGetLineWidth
 // TODO GXGetPointSize
 
+void GXGetVtxDesc(GXAttr attr, GXAttrType* type) {
+  if (!type) return;
+  if (attr >= GX_VA_MAX_ATTR) {
+    *type = GX_NONE;
+    return;
+  }
+  *type = g_gxState().vtxDesc[attr];
+}
+
+void GXGetVtxDescv(GXVtxDescList* list) {
+  if (!list) return;
+  u32 n = 0;
+  for (u32 attr = GX_VA_PNMTXIDX; attr < GX_VA_MAX_ATTR && n < GX_MAX_VTXDESCLIST_SZ - 1; ++attr) {
+    const auto type = g_gxState().vtxDesc[attr];
+    if (type == GX_NONE) continue;
+    list[n].attr = static_cast<GXAttr>(attr);
+    list[n].type = type;
+    ++n;
+  }
+  list[n].attr = GX_VA_NULL;
+  list[n].type = GX_NONE;
+}
+
 void GXGetVtxAttrFmt(GXVtxFmt idx, GXAttr attr, GXCompCnt* compCnt, GXCompType* compType, u8* shift) {
-  const auto& fmt = g_gxState.vtxFmts[idx].attrs[attr];
+  const auto& fmt = g_gxState().vtxFmts[idx].attrs[attr];
   *compCnt = fmt.cnt;
   *compType = fmt.type;
   *shift = fmt.frac;
@@ -20,8 +43,8 @@ void GXGetVtxAttrFmt(GXVtxFmt idx, GXAttr attr, GXCompCnt* compCnt, GXCompType* 
 // TODO GXGetViewportv
 
 void GXGetProjectionv(f32* p) {
-  const auto& mtx = g_gxState.proj;
-  const auto type = g_gxState.projType;
+  const auto& mtx = g_gxState().proj;
+  const auto type = g_gxState().projType;
   p[0] = static_cast<float>(type);
   p[1] = mtx(0, 0);
   p[3] = mtx(1, 1);

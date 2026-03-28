@@ -2,7 +2,6 @@
 
 namespace {
 inline void notify_tev_state() {
-  porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Tev);
 }
 } // namespace
 
@@ -42,35 +41,35 @@ void GXSetTevOp(GXTevStageID id, GXTevMode mode) {
 }
 
 void GXSetTevColorIn(GXTevStageID stageId, GXTevColorArg a, GXTevColorArg b, GXTevColorArg c, GXTevColorArg d) {
-  update_gx_state(g_gxState.tevStages[stageId].colorPass, {a, b, c, d});
+  update_gx_state(g_gxState().tevStages[stageId].colorPass, {a, b, c, d});
   notify_tev_state();
 }
 
 void GXSetTevAlphaIn(GXTevStageID stageId, GXTevAlphaArg a, GXTevAlphaArg b, GXTevAlphaArg c, GXTevAlphaArg d) {
-  update_gx_state(g_gxState.tevStages[stageId].alphaPass, {a, b, c, d});
+  update_gx_state(g_gxState().tevStages[stageId].alphaPass, {a, b, c, d});
   notify_tev_state();
 }
 
 void GXSetTevColorOp(GXTevStageID stageId, GXTevOp op, GXTevBias bias, GXTevScale scale, bool clamp,
                      GXTevRegID outReg) {
-  update_gx_state(g_gxState.tevStages[stageId].colorOp, {op, bias, scale, outReg, clamp});
+  update_gx_state(g_gxState().tevStages[stageId].colorOp, {op, bias, scale, outReg, clamp});
   notify_tev_state();
 }
 
 void GXSetTevAlphaOp(GXTevStageID stageId, GXTevOp op, GXTevBias bias, GXTevScale scale, bool clamp,
                      GXTevRegID outReg) {
-  update_gx_state(g_gxState.tevStages[stageId].alphaOp, {op, bias, scale, outReg, clamp});
+  update_gx_state(g_gxState().tevStages[stageId].alphaOp, {op, bias, scale, outReg, clamp});
   notify_tev_state();
 }
 
 void GXSetTevColor(GXTevRegID id, GXColor color) {
   CHECK(id >= GX_TEVPREV && id < GX_MAX_TEVREG, "bad tevreg {}", static_cast<int>(id));
-  update_gx_state(g_gxState.colorRegs[id], from_gx_color(color));
+  update_gx_state(g_gxState().colorRegs[id], from_gx_color(color));
   notify_tev_state();
 }
 
 void GXSetTevColorS10(GXTevRegID id, GXColorS10 color) {
-  update_gx_state(g_gxState.colorRegs[id], porpoise::Vec4<float>{
+  update_gx_state(g_gxState().colorRegs[id], porpoise::Vec4<float>{
                                                static_cast<float>(color.r) / 255.f,
                                                static_cast<float>(color.g) / 255.f,
                                                static_cast<float>(color.b) / 255.f,
@@ -80,12 +79,12 @@ void GXSetTevColorS10(GXTevRegID id, GXColorS10 color) {
 }
 
 void GXSetAlphaCompare(GXCompare comp0, u8 ref0, GXAlphaOp op, GXCompare comp1, u8 ref1) {
-  update_gx_state(g_gxState.alphaCompare, {comp0, ref0, op, comp1, ref1});
+  update_gx_state(g_gxState().alphaCompare, {comp0, ref0, op, comp1, ref1});
   notify_tev_state();
 }
 
 void GXSetTevOrder(GXTevStageID id, GXTexCoordID tcid, GXTexMapID tmid, GXChannelID cid) {
-  auto& stage = g_gxState.tevStages[id];
+  auto& stage = g_gxState().tevStages[id];
   update_gx_state(stage.texCoordId, tcid);
   update_gx_state(stage.texMapId, tmid);
   update_gx_state(stage.channelId, cid);
@@ -97,28 +96,28 @@ void GXSetZTexture(GXZTexOp op, GXTexFmt fmt, u32 bias) {
 }
 
 void GXSetNumTevStages(u8 num) {
-  update_gx_state(g_gxState.numTevStages, num);
+  update_gx_state(g_gxState().numTevStages, num);
   notify_tev_state();
 }
 
 void GXSetTevKColor(GXTevKColorID id, GXColor color) {
   CHECK(id >= GX_KCOLOR0 && id < GX_MAX_KCOLOR, "bad kcolor {}", static_cast<int>(id));
-  update_gx_state(g_gxState.kcolors[id], from_gx_color(color));
+  update_gx_state(g_gxState().kcolors[id], from_gx_color(color));
   notify_tev_state();
 }
 
 void GXSetTevKColorSel(GXTevStageID id, GXTevKColorSel sel) {
-  update_gx_state(g_gxState.tevStages[id].kcSel, sel);
+  update_gx_state(g_gxState().tevStages[id].kcSel, sel);
   notify_tev_state();
 }
 
 void GXSetTevKAlphaSel(GXTevStageID id, GXTevKAlphaSel sel) {
-  update_gx_state(g_gxState.tevStages[id].kaSel, sel);
+  update_gx_state(g_gxState().tevStages[id].kaSel, sel);
   notify_tev_state();
 }
 
 void GXSetTevSwapMode(GXTevStageID stageId, GXTevSwapSel rasSel, GXTevSwapSel texSel) {
-  auto& stage = g_gxState.tevStages[stageId];
+  auto& stage = g_gxState().tevStages[stageId];
   update_gx_state(stage.tevSwapRas, rasSel);
   update_gx_state(stage.tevSwapTex, texSel);
   notify_tev_state();
@@ -127,7 +126,7 @@ void GXSetTevSwapMode(GXTevStageID stageId, GXTevSwapSel rasSel, GXTevSwapSel te
 void GXSetTevSwapModeTable(GXTevSwapSel id, GXTevColorChan red, GXTevColorChan green, GXTevColorChan blue,
                            GXTevColorChan alpha) {
   CHECK(id >= GX_TEV_SWAP0 && id < GX_MAX_TEVSWAP, "bad tev swap sel {}", static_cast<int>(id));
-  update_gx_state(g_gxState.tevSwapTable[id], {red, green, blue, alpha});
+  update_gx_state(g_gxState().tevSwapTable[id], {red, green, blue, alpha});
   notify_tev_state();
 }
 }

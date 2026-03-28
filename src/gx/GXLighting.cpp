@@ -10,7 +10,6 @@ inline constexpr float M_PIF = 3.14159265358979323846f;
 
 namespace {
 inline void notify_lighting_state() {
-  porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Lighting);
 }
 } // namespace
 
@@ -159,7 +158,7 @@ void GXLoadLightObjImm(GXLightObj* light_, GXLightID id) {
   realLight.color = from_gx_color(light->color);
   realLight.cosAtt = {light->a0, light->a1, light->a2};
   realLight.distAtt = {light->k0, light->k1, light->k2};
-  update_gx_state(g_gxState.lights[idx], realLight);
+  update_gx_state(g_gxState().lights[idx], realLight);
   notify_lighting_state();
 }
 
@@ -176,7 +175,7 @@ void GXSetChanAmbColor(GXChannelID id, GXColor color) {
     return;
   }
   CHECK(id >= GX_COLOR0 && id <= GX_ALPHA1, "bad channel {}", static_cast<int>(id));
-  update_gx_state(g_gxState.colorChannelState[id].ambColor, from_gx_color(color));
+  update_gx_state(g_gxState().colorChannelState[id].ambColor, from_gx_color(color));
   notify_lighting_state();
 }
 
@@ -191,12 +190,12 @@ void GXSetChanMatColor(GXChannelID id, GXColor color) {
     return;
   }
   CHECK(id >= GX_COLOR0 && id <= GX_ALPHA1, "bad channel {}", static_cast<int>(id));
-  update_gx_state(g_gxState.colorChannelState[id].matColor, from_gx_color(color));
+  update_gx_state(g_gxState().colorChannelState[id].matColor, from_gx_color(color));
   notify_lighting_state();
 }
 
 void GXSetNumChans(u8 num) {
-  update_gx_state(g_gxState.numChans, num);
+  update_gx_state(g_gxState().numChans, num);
   notify_lighting_state();
 }
 
@@ -250,13 +249,13 @@ void GXSetChanCtrl(GXChannelID id, bool lightingEnabled, GXColorSrc ambSrc, GXCo
     return;
   }
   CHECK(id >= GX_COLOR0 && id <= GX_ALPHA1, "bad channel {}", static_cast<int>(id));
-  auto& chan = g_gxState.colorChannelConfig[id];
+  auto& chan = g_gxState().colorChannelConfig[id];
   update_gx_state(chan.lightingEnabled, lightingEnabled);
   update_gx_state(chan.ambSrc, ambSrc);
   update_gx_state(chan.matSrc, matSrc);
   update_gx_state(chan.diffFn, diffFn);
   update_gx_state(chan.attnFn, attnFn);
-  update_gx_state(g_gxState.colorChannelState[id].lightMask, GX::LightMask{lightState});
+  update_gx_state(g_gxState().colorChannelState[id].lightMask, GX::LightMask{lightState});
   notify_lighting_state();
 }
 }

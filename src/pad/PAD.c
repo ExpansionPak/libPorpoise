@@ -358,6 +358,26 @@ static void ReadKeyboard(PADStatus* status) {
 }
 
 /*---------------------------------------------------------------------------*
+  Name:         PadAxisToStickSafe
+
+  Description:  Convert SDL axis range (-32768..32767) to PAD stick range.
+                Uses widened math for inversion to avoid -32768 overflow.
+ *---------------------------------------------------------------------------*/
+static s8 PadAxisToStickSafe(s16 axis, BOOL invert) {
+    s32 value = (s32)axis;
+    if (invert) {
+        value = -value;
+        // -(-32768) produces 32768 in widened math; clamp before downscale.
+        if (value > 32767) {
+            value = 32767;
+        }
+    }
+
+    // Keep historical PAD range semantics after scaling.
+    return (s8)(value / 256);
+}
+
+/*---------------------------------------------------------------------------*
   Name:         ReadGamepad
 
   Description:  Read gamepad input via SDL2 and convert to PADStatus.
@@ -420,14 +440,14 @@ static void ReadGamepad(s32 chan, PADStatus* status) {
     // Read analog stick (SDL returns -32768 to 32767, convert to -128 to 127)
     s16 axisX = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
     s16 axisY = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
-    status->stickX = (s8)(axisX / 256);
-    status->stickY = (s8)(-axisY / 256);  // Invert Y (SDL uses down=positive)
+    status->stickX = PadAxisToStickSafe(axisX, FALSE);
+    status->stickY = PadAxisToStickSafe(axisY, TRUE);  // Invert Y (SDL uses down=positive)
     
     // Read C-stick (right analog)
     s16 cAxisX = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX);
     s16 cAxisY = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
-    status->substickX = (s8)(cAxisX / 256);
-    status->substickY = (s8)(-cAxisY / 256);  // Invert Y
+    status->substickX = PadAxisToStickSafe(cAxisX, FALSE);
+    status->substickY = PadAxisToStickSafe(cAxisY, TRUE);  // Invert Y
     
     // Read triggers (SDL returns 0-32767, convert to 0-255)
     u16 trigL = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT);

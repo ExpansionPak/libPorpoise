@@ -79,8 +79,11 @@ void DEMOInit(GXRenderModeObj *mode)
     DEMOConfigureMem();
 
     // Initializes graphics
-    // GX removed - stubbed
-    DemoFifoObj = NULL;
+    DemoFifoObj = GXInit(DemoFifoBuffer, DEFAULT_FIFO_SIZE);
+    if (DemoFifoObj != NULL) {
+        GXSetCPUFifo(DemoFifoObj);
+        GXSetGPFifo(DemoFifoObj);
+    }
     DEMOInitGX();
 
     // Starts VI
@@ -125,9 +128,19 @@ void DEMOConfigureMem(void)
     /*----------------------------------------------------------------*
      *  Allocate external framebuffers                                *
      *----------------------------------------------------------------*/
-    // On PC, framebuffers are handled by OpenGL/SDL
-    // Allocate dummy buffers for compatibility
-    fbSize = 640 * 480 * 2; // RGB565 = 2 bytes per pixel
+    // On PC, framebuffers are still used by GXCopyDisp/VI presentation.
+    // Match the configured XFB dimensions and padded stride.
+    u32 fbWidth = 640;
+    u32 xfbHeight = 480;
+    if (Rmode) {
+        if (Rmode->fbWidth > 0) {
+            fbWidth = VIPadFrameBufferWidth(Rmode->fbWidth);
+        }
+        if (Rmode->xfbHeight > 0) {
+            xfbHeight = Rmode->xfbHeight;
+        }
+    }
+    fbSize = fbWidth * xfbHeight * VI_DISPLAY_PIX_SZ;
     allocatedFrameBufferSize = fbSize;
     DemoFrameBuffer1 = malloc(fbSize);
     DemoFrameBuffer2 = malloc(fbSize);
@@ -256,8 +269,7 @@ void DEMOSwapBuffers(void)
     // Wait for vertical retrace.
     VIWaitForRetrace();
     
-    // Rust renderer presents via WGPU surface directly. Only swap GL buffers when
-    // legacy OpenGL path rendered this frame.
+    // Swap GL buffers for the active backend.
     if (!porpoise::gfx::did_render_with_bridge()) {
         VISwapBuffers();
     }
@@ -296,4 +308,3 @@ void DEMOReInit(GXRenderModeObj *mode)
 #ifdef __cplusplus
 } // extern "C"
 #endif
-

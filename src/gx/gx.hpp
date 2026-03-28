@@ -3,7 +3,6 @@
 #include "../gfx/internal.hpp"
 #include "../gfx/math.hpp"
 #include "../gfx/gx_state.hpp"
-#include "../gfx/rust_renderer_bridge.hpp"
 #include <dolphin/gx.h>
 #include <unordered_map>
 #include <cstring>
@@ -27,8 +26,7 @@ static porpoise::Log Log("aurora::gx");
 template <typename T>
 static inline void update_gx_state(T& val, T newVal) {
   val = std::move(newVal);
-  porpoise::gfx::gx::g_gxState.stateDirty = true;
-  porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::StateGeneric);
+  porpoise::gfx::gx::g_gxState().stateDirty = true;
 }
 
 static inline porpoise::Vec4<float> from_gx_color(GXColor color) {
@@ -39,3 +37,7 @@ static inline porpoise::Vec4<float> from_gx_color(GXColor color) {
       static_cast<float>(color.a) / 255.f,
   };
 }
+
+/** Clear any incomplete GX vertex stream state. Call when switching GX threads
+    to avoid "Stream began twice" if the previous thread exited without GXEnd. */
+void GXResetStreamState(void);

@@ -3,7 +3,6 @@
 #include "../gfx/render.hpp"
 #include "../gfx/texture.hpp"
 #include "../gfx/gx_state.hpp"
-#include "../gfx/rust_renderer_bridge.hpp"
 #include "../gfx/window.hpp"
 #include <dolphin/os.h>
 #include <dolphin/vi.h>
@@ -96,13 +95,13 @@ void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
   s_dispCopyHeight = ht;
 }
 
-void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) { g_gxState.texCopySrc = {left, top, wd, ht}; }
+void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) { g_gxState().texCopySrc = {left, top, wd, ht}; }
 
 void GXSetDispCopyDst(u16 wd, u16 ht) {}
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
   // TODO texture copy scaling (mipmap)
-  g_gxState.texCopyFmt = fmt;
+  g_gxState().texCopyFmt = fmt;
 }
 
 // TODO GXSetDispCopyFrame2Field
@@ -119,7 +118,7 @@ u32 GXSetDispCopyYScale(f32 vscale) {
   return __GXGetNumXfbLines(s_dispCopyHeight, reg);
 }
 
-void GXSetCopyClear(GXColor color, u32 depth) { update_gx_state(g_gxState.clearColor, from_gx_color(color)); }
+void GXSetCopyClear(GXColor color, u32 depth) { update_gx_state(g_gxState().clearColor, from_gx_color(color)); }
 
 void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {}
 
@@ -133,7 +132,6 @@ static inline u16 rgba8_to_rgb565(u8 r, u8 g, u8 b) {
 
 void GXCopyDisp(void* dest, GXBool clear) {
     if (!dest) return;
-    porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Copy);
 
     // Render pending draws before copy (frb_aa_full calls GXCopyDisp without DEMODoneRender)
     porpoise::gfx::render_before_copy();
@@ -151,25 +149,6 @@ void GXCopyDisp(void* dest, GXBool clear) {
         left = 0;
         top = 0;
     }
-
-    // Try Rust bridge first
-    if (!porpoise::gfx::bridge::copy_disp(dest, left, top, width, height, clear, g_gxState)) {
-        if (std::strcmp(porpoise::gfx::bridge::last_status(), "copy_disp_readback_failed") == 0) {
-            if (porpoise::gfx::bridge::copy_disp(dest, left, top, width, height, clear, g_gxState)) {
-                return;
-            }
-        }
-    } else {
-        return;
-    }
-#ifdef PORPOISE_RUST_BRIDGE_ONLY
-    static int s_copyDispDeclines = 0;
-    if (s_copyDispDeclines < 120) {
-      OSReport("[GXCopyDisp] Rust bridge declined: %s\n", porpoise::gfx::bridge::last_status());
-      ++s_copyDispDeclines;
-    }
-    return;
-#endif
 
     {
     // OpenGL path: read region from framebuffer
@@ -204,30 +183,18 @@ void GXCopyDisp(void* dest, GXBool clear) {
 }
 
 void GXCopyTex(void* dest, GXBool clear) {
-  const auto& rect = g_gxState.texCopySrc;
-  porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Copy);
-  if (porpoise::gfx::bridge::copy_tex(dest, rect, g_gxState.texCopyFmt, clear, g_gxState)) {
-    return;
-  }
-#ifdef PORPOISE_RUST_BRIDGE_ONLY
-  static int s_copyTexDeclines = 0;
-  if (s_copyTexDeclines < 120) {
-    OSReport("[GXCopyTex] Rust bridge declined: %s\n", porpoise::gfx::bridge::last_status());
-    ++s_copyTexDeclines;
-  }
-  return;
-#endif
+  const auto& rect = g_gxState().texCopySrc;
   porpoise::gfx::TextureHandle* handle = nullptr;
-  const auto it = g_gxState.copyTextures.find(dest);
-  if (it == g_gxState.copyTextures.end() || 
+  const auto it = g_gxState().copyTextures.find(dest);
+  if (it == g_gxState().copyTextures.end() || 
       it->second->width != rect.width || 
       it->second->height != rect.height) {
-    handle = porpoise::gfx::new_render_texture(rect.width, rect.height, g_gxState.texCopyFmt, "Resolved Texture");
-    g_gxState.copyTextures[dest] = handle;
+    handle = porpoise::gfx::new_render_texture(rect.width, rect.height, g_gxState().texCopyFmt, "Resolved Texture");
+    g_gxState().copyTextures[dest] = handle;
   } else {
     handle = it->second;
   }
-  porpoise::gfx::resolve_pass(*handle, rect, clear, g_gxState.clearColor);
+  porpoise::gfx::resolve_pass(*handle, rect, clear, g_gxState().clearColor);
 }
 
 f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight) {

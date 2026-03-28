@@ -11,7 +11,7 @@ namespace {
 static u32 getIndexedVertexStride(GXVtxFmt /*vtxFmt*/) {
   u32 stride = 0;
   for (GXAttr attr = GX_VA_PNMTXIDX; attr < GX_VA_MAX_ATTR; attr = static_cast<GXAttr>(attr + 1)) {
-    const auto type = g_gxState.vtxDesc[attr];
+    const auto type = g_gxState().vtxDesc[attr];
     if (type == GX_INDEX8) {
       stride += 1;
     } else if (type == GX_INDEX16) {
@@ -52,7 +52,7 @@ static u32 executeDrawCommand(const u8* ptr, u32 remaining) {
   for (u32 v = 0; v < nVerts; ++v, idx += stride) {
     u32 off = 0;
     for (GXAttr attr = GX_VA_PNMTXIDX; attr < GX_VA_MAX_ATTR; attr = static_cast<GXAttr>(attr + 1)) {
-      const auto type = g_gxState.vtxDesc[attr];
+      const auto type = g_gxState().vtxDesc[attr];
       if (type == GX_INDEX8) {
         const u8 i = idx[off++];
         if (attr == GX_VA_POS) GXPosition1x8(i);
@@ -80,12 +80,12 @@ static u32 executeDrawCommand(const u8* ptr, u32 remaining) {
 
 extern "C" {
 void GXBeginDisplayList(void* list, u32 size) {
-  CHECK(!g_gxState.dynamicDlBuf, "Display list began twice!");
-  g_gxState.dynamicDlBuf.emplace(static_cast<u8*>(list), size);
+  CHECK(!g_gxState().dynamicDlBuf, "Display list began twice!");
+  g_gxState().dynamicDlBuf.emplace(static_cast<u8*>(list), size);
 }
 
 u32 GXEndDisplayList() {
-  auto& dlBuf = g_gxState.dynamicDlBuf;
+  auto& dlBuf = g_gxState().dynamicDlBuf;
   size_t size = dlBuf->size();
   size_t paddedSize = ROUNDUP32(size);
   dlBuf->append_zeroes(paddedSize - size);

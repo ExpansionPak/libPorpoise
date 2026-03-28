@@ -2,11 +2,9 @@
 #include "gx_state.hpp"
 #include "common.hpp"
 #include "math.hpp"
-#include "rust_renderer_bridge.hpp"
 #include "window.hpp"
 #include <dolphin/os.h>  // For OSReport
 #include <dolphin/vi.h>  // For VIMakeContextCurrent
-#include <cstdlib>
 
 // OpenGL includes
 #ifdef _WIN32
@@ -90,9 +88,19 @@ namespace porpoise::gfx {
 using namespace porpoise::gfx::gx;
 
 // Staging buffers for vertex/index data (similar to Aurora)
-static std::vector<uint8_t> g_vertexBuffer;
-static std::vector<uint8_t> g_indexBuffer;
-static std::vector<DrawData> g_drawCommands;
+// Function-local statics avoid static init order fiasco when linked with PikminDemo
+static std::vector<uint8_t>& g_vertexBuffer() {
+  static std::vector<uint8_t> s;
+  return s;
+}
+static std::vector<uint8_t>& g_indexBuffer() {
+  static std::vector<uint8_t> s;
+  return s;
+}
+static std::vector<DrawData>& g_drawCommands() {
+  static std::vector<DrawData> s;
+  return s;
+}
 static bool g_lastFrameByBridge = false;
 static bool g_rendered_this_frame = false;
 
@@ -146,9 +154,9 @@ Range push_verts(const uint8_t* data, size_t length) {
     return {0, 0}; // Suspiciously large, skip it
   }
   
-  const uint32_t offset = static_cast<uint32_t>(g_vertexBuffer.size());
+  const uint32_t offset = static_cast<uint32_t>(g_vertexBuffer().size());
   try {
-    g_vertexBuffer.insert(g_vertexBuffer.end(), data, data + length);
+    g_vertexBuffer().insert(g_vertexBuffer().end(), data, data + length);
     // No logging - too verbose
   } catch (...) {
     // If insertion fails (e.g., out of memory), return empty range
@@ -169,9 +177,9 @@ Range push_indices(const uint8_t* data, size_t length) {
     return {0, 0}; // Suspiciously large, skip it
   }
   
-  const uint32_t offset = static_cast<uint32_t>(g_indexBuffer.size());
+  const uint32_t offset = static_cast<uint32_t>(g_indexBuffer().size());
   try {
-    g_indexBuffer.insert(g_indexBuffer.end(), data, data + length);
+    g_indexBuffer().insert(g_indexBuffer().end(), data, data + length);
   } catch (...) {
     // If insertion fails (e.g., out of memory), return empty range
     return {0, 0};
@@ -182,22 +190,20 @@ Range push_indices(const uint8_t* data, size_t length) {
 
 // Queue a draw command
 void push_draw_command(const DrawData& data) {
-  g_drawCommands.push_back(data);
-  bridge::push_draw_command(data);
+  g_drawCommands().push_back(data);
 }
 
 // Clear all queued commands (called at start of frame)
 void begin_frame() {
   g_lastFrameByBridge = false;
   g_rendered_this_frame = false;
-  g_drawCommands.clear();
-  g_vertexBuffer.clear();
-  g_indexBuffer.clear();
-  // Array cached ranges point into g_vertexBuffer, so they are invalid after clear().
-  for (auto& array : g_gxState.arrays) {
+  g_drawCommands().clear();
+  g_vertexBuffer().clear();
+  g_indexBuffer().clear();
+  // Array cached ranges point into g_vertexBuffer(), so they are invalid after clear().
+  for (auto& array : g_gxState().arrays) {
     array.cachedRange = {0, 0};
   }
-  bridge::begin_frame(g_gxState);
 }
 
 // Convert GX matrix (column-major) to OpenGL matrix (column-major, but different layout)
@@ -213,10 +219,10 @@ static void set_gl_matrix(const porpoise::Mat4x4<float>& gxMtx) {
 // Set up OpenGL state from GX state
 static void setup_gl_state() {
   // Set up depth testing
-  if (g_gxState.depthCompare) {
+  if (g_gxState().depthCompare) {
     glEnable(GL_DEPTH_TEST);
     GLenum depthFunc = GL_LEQUAL;
-    switch (g_gxState.depthFunc) {
+    switch (g_gxState().depthFunc) {
       case GX_NEVER: depthFunc = GL_NEVER; break;
       case GX_LESS: depthFunc = GL_LESS; break;
       case GX_EQUAL: depthFunc = GL_EQUAL; break;
@@ -231,31 +237,31 @@ static void setup_gl_state() {
     glDisable(GL_DEPTH_TEST);
   }
   
-  glDepthMask(g_gxState.depthUpdate ? GL_TRUE : GL_FALSE);
+  glDepthMask(g_gxState().depthUpdate ? GL_TRUE : GL_FALSE);
   
   // Set up color/alpha writes
   glColorMask(
-    g_gxState.colorUpdate ? GL_TRUE : GL_FALSE,
-    g_gxState.colorUpdate ? GL_TRUE : GL_FALSE,
-    g_gxState.colorUpdate ? GL_TRUE : GL_FALSE,
-    g_gxState.alphaUpdate ? GL_TRUE : GL_FALSE
+    g_gxState().colorUpdate ? GL_TRUE : GL_FALSE,
+    g_gxState().colorUpdate ? GL_TRUE : GL_FALSE,
+    g_gxState().colorUpdate ? GL_TRUE : GL_FALSE,
+    g_gxState().alphaUpdate ? GL_TRUE : GL_FALSE
   );
   
   // Set up culling
-  if (g_gxState.cullMode != GX_CULL_NONE) {
+  if (g_gxState().cullMode != GX_CULL_NONE) {
     glEnable(GL_CULL_FACE);
-    glCullFace(g_gxState.cullMode == GX_CULL_FRONT ? GL_FRONT : GL_BACK);
+    glCullFace(g_gxState().cullMode == GX_CULL_FRONT ? GL_FRONT : GL_BACK);
   } else {
     glDisable(GL_CULL_FACE);
   }
   
   // Set up blending
-  if (g_gxState.blendMode != GX_BM_NONE) {
+  if (g_gxState().blendMode != GX_BM_NONE) {
     glEnable(GL_BLEND);
     GLenum srcFactor = GL_SRC_ALPHA;
     GLenum dstFactor = GL_ONE_MINUS_SRC_ALPHA;
     // Basic blend factor conversion (simplified)
-    switch (g_gxState.blendFacSrc) {
+    switch (g_gxState().blendFacSrc) {
       case GX_BL_ZERO: srcFactor = GL_ZERO; break;
       case GX_BL_ONE: srcFactor = GL_ONE; break;
       case GX_BL_SRCCLR: srcFactor = GL_SRC_COLOR; break;
@@ -264,7 +270,7 @@ static void setup_gl_state() {
       case GX_BL_INVSRCALPHA: srcFactor = GL_ONE_MINUS_SRC_ALPHA; break;
       default: break;
     }
-    switch (g_gxState.blendFacDst) {
+    switch (g_gxState().blendFacDst) {
       case GX_BL_ZERO: dstFactor = GL_ZERO; break;
       case GX_BL_ONE: dstFactor = GL_ONE; break;
       case GX_BL_SRCCLR: dstFactor = GL_SRC_COLOR; break;
@@ -284,26 +290,13 @@ static void setup_gl_state() {
 void render() {
   static int frameCount = 0;
   frameCount++;
+  g_lastFrameByBridge = false;
 
-  // Bridge-first path: if Rust backend reports the frame as handled, skip
-  // legacy OpenGL execution for this frame.
-  // Set PORPOISE_FORCE_OPENGL=1 to use OpenGL even when Rust bridge is loaded (e.g. if only blue screen).
-  const bool forceOpenGL = (std::getenv("PORPOISE_FORCE_OPENGL") != nullptr);
-  if (!forceOpenGL && bridge::render(g_vertexBuffer, g_indexBuffer, g_gxState)) {
-    g_lastFrameByBridge = true;
+  // When tabbed away/minimized, skip issuing GL work entirely.
+  if (VIIsRenderSuspended()) {
     g_rendered_this_frame = true;
     return;
   }
-  g_lastFrameByBridge = false;
-
-#ifdef PORPOISE_RUST_BRIDGE_ONLY
-  static int bridgeDeclineLogs = 0;
-  if (bridgeDeclineLogs < 120) {
-    OSReport("[render] Rust bridge declined frame: %s\n", bridge::last_status());
-    ++bridgeDeclineLogs;
-  }
-  return;
-#endif
   
   // Ensure OpenGL context is current before rendering
   VIMakeContextCurrent();
@@ -315,17 +308,23 @@ void render() {
     const auto windowSize = porpoise::window::get_window_size();
     glViewport(0, 0, static_cast<GLsizei>(windowSize.fb_width), static_cast<GLsizei>(windowSize.fb_height));
   }
+
+  // Reset clear-affecting state before clearing. glClear obeys color/depth masks
+  // and scissor, so stale GX-driven state can otherwise leave ghosted frame regions.
+  glDisable(GL_SCISSOR_TEST);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  glDepthMask(GL_TRUE);
   
   // Always clear so we never swap garbage (fixes flashing when draws are skipped or empty)
   glClearColor(
-    g_gxState.clearColor.x(),
-    g_gxState.clearColor.y(),
-    g_gxState.clearColor.z(),
-    g_gxState.clearColor.w()
+    g_gxState().clearColor.x(),
+    g_gxState().clearColor.y(),
+    g_gxState().clearColor.z(),
+    g_gxState().clearColor.w()
   );
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   
-  if (g_drawCommands.empty()) {
+  if (g_drawCommands().empty()) {
     g_rendered_this_frame = true;
     return;
   }
@@ -334,15 +333,15 @@ void render() {
   init_vbos();
   
   // Upload vertex data to VBO
-  if (!g_vertexBuffer.empty() && glBindBuffer && glBufferData) {
+  if (!g_vertexBuffer().empty() && glBindBuffer && glBufferData) {
     glBindBuffer(GL_ARRAY_BUFFER, g_vertexVBO);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(g_vertexBuffer.size()), g_vertexBuffer.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(g_vertexBuffer().size()), g_vertexBuffer().data(), GL_DYNAMIC_DRAW);
   }
   
   // Upload index data to VBO
-  if (!g_indexBuffer.empty() && glBindBuffer && glBufferData) {
+  if (!g_indexBuffer().empty() && glBindBuffer && glBufferData) {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_indexVBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(g_indexBuffer.size()), g_indexBuffer.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(g_indexBuffer().size()), g_indexBuffer().data(), GL_DYNAMIC_DRAW);
   }
   
   // Set up OpenGL state
@@ -364,11 +363,11 @@ void render() {
   // Projection and modelview are set per draw from cmd.proj and cmd.modelView
   
   // Process each draw command
-  for (const auto& cmd : g_drawCommands) {
+  for (const auto& cmd : g_drawCommands()) {
     if (cmd.vertRange.size == 0) continue;
     
     // Validate buffer bounds
-    if (cmd.vertRange.offset + cmd.vertRange.size > g_vertexBuffer.size()) {
+    if (cmd.vertRange.offset + cmd.vertRange.size > g_vertexBuffer().size()) {
       continue; // Invalid range, skip this command
     }
     
@@ -394,7 +393,7 @@ void render() {
     // Check if we have indexed attributes that need expansion
     bool hasIndexedAttrs = false;
     for (int i = 0; i < GX_VA_MAX_ATTR; ++i) {
-      if (g_gxState.vtxDesc[i] == GX_INDEX8 || g_gxState.vtxDesc[i] == GX_INDEX16) {
+      if (g_gxState().vtxDesc[i] == GX_INDEX8 || g_gxState().vtxDesc[i] == GX_INDEX16) {
         if (cmd.arrayRanges[i].size > 0) {
           hasIndexedAttrs = true;
           break;
@@ -415,13 +414,13 @@ void render() {
     // Set up vertex attributes based on vertex format
     // The vertex buffer contains direct attributes only (indexed attributes are in arrays)
     // We need to calculate the stride and offsets matching GXBegin's layout
-    const auto& vtxFmt = g_gxState.vtxFmts[cmd.vtxFmt];
+    const auto& vtxFmt = g_gxState().vtxFmts[cmd.vtxFmt];
     
     // Count indexed and direct attributes (matching GXBegin logic)
     u16 numIndexedAttrs = 0;
     u16 numDirectAttrs = 0;
     for (GXAttr attr = GX_VA_POS; attr < GX_VA_MAX_ATTR; attr = static_cast<GXAttr>(attr + 1)) {
-      const auto type = g_gxState.vtxDesc[attr];
+      const auto type = g_gxState().vtxDesc[attr];
       if (type == GX_DIRECT) {
         ++numDirectAttrs;
       } else if (type == GX_INDEX8 || type == GX_INDEX16) {
@@ -453,7 +452,7 @@ void render() {
     GXAttrType colorIndexType = GX_NONE;
     
     for (GXAttr attr{}; attr < GX_VA_MAX_ATTR; attr = static_cast<GXAttr>(attr + 1)) {
-      const auto type = g_gxState.vtxDesc[attr];
+      const auto type = g_gxState().vtxDesc[attr];
       if (type == GX_DIRECT) {
         u32 attrSize = 0;
         
@@ -502,7 +501,7 @@ void render() {
       // Calculate index stride (size of index data per vertex)
       u32 indexStride = 0;
       for (GXAttr attr = GX_VA_POS; attr < GX_VA_MAX_ATTR; attr = static_cast<GXAttr>(attr + 1)) {
-        const auto type = g_gxState.vtxDesc[attr];
+        const auto type = g_gxState().vtxDesc[attr];
         if (type == GX_INDEX8) {
           indexStride += 1;
         } else if (type == GX_INDEX16) {
@@ -534,12 +533,12 @@ void render() {
       
       // Calculate expanded stride (position + color = 3 + 4 = 7 floats)
       u32 floatStride = 0;
-      if (g_gxState.vtxDesc[GX_VA_POS] == GX_INDEX8 || g_gxState.vtxDesc[GX_VA_POS] == GX_INDEX16) {
+      if (g_gxState().vtxDesc[GX_VA_POS] == GX_INDEX8 || g_gxState().vtxDesc[GX_VA_POS] == GX_INDEX16) {
         floatStride += 3; // 3 floats for position
         expandedHasPos = true;
         expandedPosOffset = 0;
       }
-      if (g_gxState.vtxDesc[GX_VA_CLR0] == GX_INDEX8 || g_gxState.vtxDesc[GX_VA_CLR0] == GX_INDEX16) {
+      if (g_gxState().vtxDesc[GX_VA_CLR0] == GX_INDEX8 || g_gxState().vtxDesc[GX_VA_CLR0] == GX_INDEX16) {
         floatStride += 4; // 4 floats for color
         expandedHasColor = true;
         expandedColorOffset = expandedHasPos ? 3 : 0;
@@ -559,23 +558,23 @@ void render() {
       u32 colorArrayStride = 0;
       
       if (expandedHasPos && cmd.arrayRanges[GX_VA_POS].size > 0) {
-        posArrayData = g_vertexBuffer.data() + cmd.arrayRanges[GX_VA_POS].offset;
-        posArrayStride = g_gxState.arrays[GX_VA_POS].stride;
+        posArrayData = g_vertexBuffer().data() + cmd.arrayRanges[GX_VA_POS].offset;
+        posArrayStride = g_gxState().arrays[GX_VA_POS].stride;
       }
       if (expandedHasColor && cmd.arrayRanges[GX_VA_CLR0].size > 0) {
-        colorArrayData = g_vertexBuffer.data() + cmd.arrayRanges[GX_VA_CLR0].offset;
-        colorArrayStride = g_gxState.arrays[GX_VA_CLR0].stride;
+        colorArrayData = g_vertexBuffer().data() + cmd.arrayRanges[GX_VA_CLR0].offset;
+        colorArrayStride = g_gxState().arrays[GX_VA_CLR0].stride;
       }
       
       // Get index data from vertex buffer
-      const uint8_t* indexData = g_vertexBuffer.data() + cmd.vertRange.offset;
+      const uint8_t* indexData = g_vertexBuffer().data() + cmd.vertRange.offset;
       
       // Calculate position index offset in vertex layout
       u32 posIndexOffset = 0;
       u32 colorIndexOffset = 0;
       u32 currentOffset = 0;
       for (GXAttr attr = GX_VA_POS; attr < GX_VA_MAX_ATTR; attr = static_cast<GXAttr>(attr + 1)) {
-        const auto type = g_gxState.vtxDesc[attr];
+        const auto type = g_gxState().vtxDesc[attr];
         if (type == GX_INDEX8) {
           if (attr == GX_VA_POS) posIndexOffset = currentOffset;
           if (attr == GX_VA_CLR0) colorIndexOffset = currentOffset;
@@ -599,7 +598,7 @@ void render() {
       const u16* vertexIndexBuffer = nullptr;
       bool useVertexIndexBuffer = (cmd.indexCount > 0 && cmd.idxRange.size > 0);
       if (useVertexIndexBuffer) {
-        vertexIndexBuffer = reinterpret_cast<const u16*>(g_indexBuffer.data() + cmd.idxRange.offset);
+        vertexIndexBuffer = reinterpret_cast<const u16*>(g_indexBuffer().data() + cmd.idxRange.offset);
       }
       
       // Calculate how many attribute index sets we have in vertRange
@@ -792,7 +791,7 @@ void render() {
       }
     } else {
       // Immediate mode - pointer is absolute address
-      const uint8_t* basePtr = g_vertexBuffer.data() + cmd.vertRange.offset;
+      const uint8_t* basePtr = g_vertexBuffer().data() + cmd.vertRange.offset;
       if (hasPosition) {
         glEnableClientState(GL_VERTEX_ARRAY);
         glVertexPointer(3, GL_FLOAT, vertexStride, basePtr + posOffset);
@@ -814,7 +813,7 @@ void render() {
     // Draw
     if (cmd.indexCount > 0 && cmd.idxRange.size > 0) {
       // Validate index buffer bounds
-      if (cmd.idxRange.offset + cmd.idxRange.size > g_indexBuffer.size()) {
+      if (cmd.idxRange.offset + cmd.idxRange.size > g_indexBuffer().size()) {
         continue; // Invalid range, skip this command
       }
       
@@ -825,7 +824,7 @@ void render() {
                       reinterpret_cast<const void*>(static_cast<uintptr_t>(cmd.idxRange.offset)));
       } else {
         // Immediate mode - use direct pointer
-        const u16* indices = reinterpret_cast<const u16*>(g_indexBuffer.data() + cmd.idxRange.offset);
+        const u16* indices = reinterpret_cast<const u16*>(g_indexBuffer().data() + cmd.idxRange.offset);
         glDrawElements(glPrim, cmd.indexCount, GL_UNSIGNED_SHORT, indices);
       }
     } else {
@@ -852,13 +851,13 @@ void render() {
 }
 
 void flush_render_if_pending() {
-  if (!g_rendered_this_frame && !g_drawCommands.empty()) {
+  if (!g_rendered_this_frame && !g_drawCommands().empty()) {
     render();
   }
 }
 
 void render_before_copy() {
-  if (!g_drawCommands.empty()) {
+  if (!g_drawCommands().empty()) {
     render();
   }
 }
@@ -868,4 +867,3 @@ bool did_render_with_bridge() {
 }
 
 } // namespace porpoise::gfx
-

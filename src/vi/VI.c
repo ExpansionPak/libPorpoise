@@ -54,6 +54,9 @@
 #include <string.h>
 #include <stdlib.h>
 
+// ACPC GX backend helper to switch from shader pipeline to fixed-function blit.
+extern void pc_gx_prepare_for_present(void);
+
 /*---------------------------------------------------------------------------*
     Internal State
  *---------------------------------------------------------------------------*/
@@ -70,6 +73,9 @@ static SDL_Window* s_window = NULL;
 static SDL_GLContext s_glContext = NULL;
 static int s_windowWidth = 640;
 static int s_windowHeight = 480;
+static int s_xfbWidth = 640;
+static int s_xfbHeight = 480;
+static GLuint s_xfbTexture = 0;
 
 // Configuration
 static VIConfig s_config;
@@ -267,6 +273,9 @@ void VIInit(void) {
     // Apply config values
     s_windowWidth = s_config.windowWidth;
     s_windowHeight = s_config.windowHeight;
+    s_xfbWidth = 640;
+    s_xfbHeight = 480;
+    s_xfbTexture = 0;
     
     // Ensure SDL is initialized (required before subsystems)
     // SDL_InitSubSystem can work without SDL_Init, but it's safer to init first
@@ -568,11 +577,16 @@ void VISet3D(BOOL threeD) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void VIConfigure(const GXRenderModeObj* rm) {
-    (void)rm;
+    if (!rm) {
+        return;
+    }
 
-    /* On PC, the render mode is handled by GX module.
-     * VI just needs to know it was configured.
-     */
+    if (rm->fbWidth > 0) {
+        s_xfbWidth = (int)VIPadFrameBufferWidth(rm->fbWidth);
+    }
+    if (rm->xfbHeight > 0) {
+        s_xfbHeight = (int)rm->xfbHeight;
+    }
 }
 
 /*---------------------------------------------------------------------------*
@@ -851,6 +865,89 @@ void VIMakeContextCurrent(void) {
     }
 }
 
+BOOL VIIsRenderSuspended(void) {
+    if (!s_window) {
+        return FALSE;
+    }
+
+    const Uint32 flags = SDL_GetWindowFlags(s_window);
+    if ((flags & SDL_WINDOW_MINIMIZED) || (flags & SDL_WINDOW_HIDDEN)) {
+        return TRUE;
+    }
+
+    // Treat unfocused windows as suspended to avoid tab-away GPU stalls.
+    if ((flags & SDL_WINDOW_INPUT_FOCUS) == 0) {
+        return TRUE;
+    }
+
+    if (s_windowWidth <= 0 || s_windowHeight <= 0) {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static void VIPresentCurrentFrameBuffer(void) {
+    if (s_black || !s_currentFB || s_xfbWidth <= 0 || s_xfbHeight <= 0) {
+        glDisable(GL_SCISSOR_TEST);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        return;
+    }
+
+    if (s_xfbTexture == 0) {
+        glGenTextures(1, &s_xfbTexture);
+        glBindTexture(GL_TEXTURE_2D, s_xfbTexture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    pc_gx_prepare_for_present();
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glViewport(0, 0, s_windowWidth, s_windowHeight);
+    // Always reset the backbuffer before blitting XFB to avoid stale pixels/ghost trails.
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0);
+
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, s_xfbTexture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, s_xfbWidth, s_xfbHeight, 0,
+                 GL_RGB, GL_UNSIGNED_SHORT_5_6_5, s_currentFB);
+
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0.0f, 1.0f); glVertex2f(-1.0f, -1.0f);
+    glTexCoord2f(1.0f, 1.0f); glVertex2f( 1.0f, -1.0f);
+    glTexCoord2f(1.0f, 0.0f); glVertex2f( 1.0f,  1.0f);
+    glTexCoord2f(0.0f, 0.0f); glVertex2f(-1.0f,  1.0f);
+    glEnd();
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+}
+
 /*---------------------------------------------------------------------------*
   Name:         VISwapBuffers
   
@@ -863,16 +960,16 @@ void VIMakeContextCurrent(void) {
  *---------------------------------------------------------------------------*/
 void VISwapBuffers(void) {
     if (s_window && s_glContext) {
-        // Check if window is minimized and restore it
-        Uint32 flags = SDL_GetWindowFlags(s_window);
-        if (flags & SDL_WINDOW_MINIMIZED) {
-            SDL_RestoreWindow(s_window);
-            SDL_RaiseWindow(s_window);
+        if (VIIsRenderSuspended()) {
+            return;
         }
-        
+
         // Ensure context is current before swapping
-        SDL_GL_MakeCurrent(s_window, s_glContext);
+        if (SDL_GL_MakeCurrent(s_window, s_glContext) != 0) {
+            OSReport("[VISwapBuffers] ERROR: SDL_GL_MakeCurrent failed: %s\n", SDL_GetError());
+            return;
+        }
+        VIPresentCurrentFrameBuffer();
         SDL_GL_SwapWindow(s_window);
     }
 }
-

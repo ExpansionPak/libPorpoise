@@ -1,0 +1,4898 @@
+﻿/* pc_gx.c - GX API â†’ OpenGL 3.3: state management, vertex submission, draw dispatch */
+#include "pc_gx_internal.h"
+#include <stddef.h>
+static GLushort quad_index_buf[(PC_GX_MAX_VERTS / 4) * 6];
+#include <math.h>
+#include <dolphin/gx/GXCommandList.h>
+#include <dolphin/gx/GXEnum.h>
+#include <dolphin/demo/DEMOInit.h>
+#include <dolphin/vi.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+/* Can't include GXTev.h â€” it uses enum types while we use u32 */
+void GXSetTevColorIn(u32 stage, u32 a, u32 b, u32 c, u32 d);
+void GXSetTevAlphaIn(u32 stage, u32 a, u32 b, u32 c, u32 d);
+void GXSetTevColorOp(u32 stage, u32 op, u32 bias, u32 scale, GXBool clamp, u32 out_reg);
+void GXSetTevAlphaOp(u32 stage, u32 op, u32 bias, u32 scale, GXBool clamp, u32 out_reg);
+
+/* --- Global GX State --- */
+PCGXState g_gx;
+static int g_pc_gx_initialized = 0;
+static void (*g_draw_done_cb)(void) = NULL;
+static PCGXVertex g_pc_gx_expanded_prim[PC_GX_MAX_VERTS * 3];
+
+/* Triangle strip CPU-expansion policy:
+ * Default preserves GL/GX strip face semantics by swapping odd triangles.
+ * For debugging, disable the odd-triangle swap with:
+ *   PC_GX_DISABLE_STRIP_ODD_SWAP=1
+ */
+static int pc_gx_disable_strip_odd_swap(void) {
+    static int init = 0;
+    static int disable_swap = 0;
+    if (!init) {
+        const char* v = getenv("PC_GX_DISABLE_STRIP_ODD_SWAP");
+        disable_swap = (v && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+        init = 1;
+    }
+    return disable_swap;
+}
+
+/* GX raster/front-face convention matches clockwise front faces in window space.
+ * Allow override for debugging:
+ *   PC_GX_FRONT_FACE_CCW=1
+ *   PC_GX_FRONT_FACE_CW=1
+ */
+static int pc_gx_front_face_is_cw(void) {
+    static int init = 0;
+    static int use_cw = 1;
+    if (!init) {
+        const char* ccw = getenv("PC_GX_FRONT_FACE_CCW");
+        const char* cw = getenv("PC_GX_FRONT_FACE_CW");
+        if (ccw && ccw[0] != '\0' && ccw[0] != '0') {
+            use_cw = 0;
+        }
+        if (cw && cw[0] != '\0' && cw[0] != '0') {
+            use_cw = 1;
+        }
+        init = 1;
+    }
+    return use_cw;
+}
+
+/* Common render modes expected by SDK demos. */
+GXRenderModeObj GXNtsc480IntDf = {
+    VI_TVMODE_NTSC_INT, 640, 480, 480, 40, 0, 640, 480, VI_XFBMODE_DF, 0, 0,
+};
+GXRenderModeObj GXNtsc480IntAa = {
+    VI_TVMODE_NTSC_INT, 640, 480, 480, 40, 0, 640, 480, VI_XFBMODE_DF, 0, 1,
+};
+GXRenderModeObj GXPal528IntDf = {
+    VI_TVMODE_PAL_INT, 704, 528, 480, 40, 0, 640, 480, VI_XFBMODE_DF, 0, 0,
+};
+GXRenderModeObj GXMpal480IntDf = {
+    VI_TVMODE_PAL_INT, 640, 480, 480, 40, 0, 640, 480, VI_XFBMODE_DF, 0, 0,
+};
+
+static int pc_gx_debug_enabled(void) {
+    static int init = 0;
+    static int enabled = 0;
+    if (!init) {
+        const char* v = getenv("PC_GX_DEBUG");
+        enabled = (v && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+        init = 1;
+    }
+    return enabled;
+}
+
+static void pc_gx_debug_log(const char* msg) {
+    FILE* f = fopen("pcgx_debug.log", "ab");
+    if (!f) return;
+    fputs(msg, f);
+    fputc('\n', f);
+    fclose(f);
+}
+
+#ifdef PC_ENHANCEMENTS
+/* Aspect correction: factor = gc_aspect/actual_aspect, offset = content left edge in GC coords */
+static float g_aspect_factor = 1.0f;
+static float g_aspect_offset = 0.0f;
+static int   g_aspect_active = 0;
+
+static void pc_gx_update_aspect(void) {
+    float gc_aspect = (float)PC_GC_WIDTH / (float)PC_GC_HEIGHT;
+    float win_aspect = (float)g_pc_window_w / (float)g_pc_window_h;
+    if (win_aspect > gc_aspect + 0.01f) {
+        g_aspect_factor = gc_aspect / win_aspect;
+        g_aspect_offset = (1.0f - g_aspect_factor) / 2.0f * (float)PC_GC_WIDTH;
+        g_aspect_active = 1;
+    } else {
+        g_aspect_factor = 1.0f;
+        g_aspect_offset = 0.0f;
+        g_aspect_active = 0;
+    }
+}
+
+/* EFB capture: keep full-res GL textures from GXCopyTex instead of downsampling to 640x480 */
+#define MAX_EFB_CAPTURES 4
+static struct {
+    uintptr_t dest_ptr;
+    GLuint gl_tex;
+} s_efb_captures[MAX_EFB_CAPTURES];
+static int s_efb_capture_count = 0;
+
+void pc_gx_efb_capture_store(uintptr_t dest_ptr, GLuint gl_tex) {
+    for (int i = 0; i < s_efb_capture_count; i++) {
+        if (s_efb_captures[i].dest_ptr == dest_ptr) {
+            if (s_efb_captures[i].gl_tex)
+                glDeleteTextures(1, &s_efb_captures[i].gl_tex);
+            s_efb_captures[i].gl_tex = gl_tex;
+            return;
+        }
+    }
+    if (s_efb_capture_count >= MAX_EFB_CAPTURES) {
+        if (s_efb_captures[0].gl_tex)
+            glDeleteTextures(1, &s_efb_captures[0].gl_tex);
+        memmove(&s_efb_captures[0], &s_efb_captures[1],
+                (MAX_EFB_CAPTURES - 1) * sizeof(s_efb_captures[0]));
+        s_efb_capture_count = MAX_EFB_CAPTURES - 1;
+    }
+    s_efb_captures[s_efb_capture_count].dest_ptr = dest_ptr;
+    s_efb_captures[s_efb_capture_count].gl_tex = gl_tex;
+    s_efb_capture_count++;
+}
+
+GLuint pc_gx_efb_capture_find(uintptr_t data_ptr) {
+    for (int i = 0; i < s_efb_capture_count; i++) {
+        if (s_efb_captures[i].dest_ptr == data_ptr)
+            return s_efb_captures[i].gl_tex;
+    }
+    return 0;
+}
+
+void pc_gx_efb_capture_cleanup(void) {
+    for (int i = 0; i < s_efb_capture_count; i++) {
+        if (s_efb_captures[i].gl_tex)
+            glDeleteTextures(1, &s_efb_captures[i].gl_tex);
+    }
+    s_efb_capture_count = 0;
+}
+#endif
+
+typedef struct {
+    int active;
+    u8* buf;
+    u32 size;
+    u32 off;
+    int overflow;
+} PCGXDLBuildState;
+
+static PCGXDLBuildState g_pc_gx_dl = {0};
+
+enum {
+    PCGX_DL_OP_TEXCOPY_SRC = 0x1001,
+    PCGX_DL_OP_TEXCOPY_DST = 0x1002,
+    PCGX_DL_OP_COPY_FILTER = 0x1003,
+    PCGX_DL_OP_COPY_TEX = 0x1004,
+    PCGX_DL_OP_DRAW_BATCH = 0x1005,
+};
+
+static void pc_gx_dl_write(const void* data, u32 len) {
+    if (!g_pc_gx_dl.active || g_pc_gx_dl.overflow) return;
+    if (g_pc_gx_dl.off + len > g_pc_gx_dl.size) {
+        g_pc_gx_dl.overflow = 1;
+        return;
+    }
+    memcpy(g_pc_gx_dl.buf + g_pc_gx_dl.off, data, len);
+    g_pc_gx_dl.off += len;
+}
+
+static void pc_gx_dl_record_draw_batch(u32 primitive, const PCGXVertex* verts, u32 count) {
+    u32 op;
+    u32 bytes;
+    if (!g_pc_gx_dl.active || g_pc_gx_dl.overflow) return;
+    if (!verts || count == 0 || count > PC_GX_MAX_VERTS) return;
+
+    op = PCGX_DL_OP_DRAW_BATCH;
+    bytes = count * (u32)sizeof(PCGXVertex);
+
+    pc_gx_dl_write(&op, sizeof(op));
+    pc_gx_dl_write(&primitive, sizeof(primitive));
+    pc_gx_dl_write(&count, sizeof(count));
+    pc_gx_dl_write(verts, bytes);
+}
+
+static u16 pc_gx_be16(const u8* p) {
+    return (u16)(((u16)p[0] << 8) | (u16)p[1]);
+}
+
+static u32 pc_gx_be32(const u8* p) {
+    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
+}
+
+static float pc_gx_be_f32(const u8* p) {
+    union {
+        u32 u;
+        float f;
+    } cvt;
+    cvt.u = pc_gx_be32(p);
+    return cvt.f;
+}
+
+static void pc_unpack_rgba8f(u32 packed, float* out_rgba) {
+    /* Shift-based: works for colors packed as (r<<24|g<<16|b<<8|a) from N64 DL data */
+    out_rgba[0] = ((packed >> 24) & 0xFF) / 255.0f;
+    out_rgba[1] = ((packed >> 16) & 0xFF) / 255.0f;
+    out_rgba[2] = ((packed >> 8) & 0xFF) / 255.0f;
+    out_rgba[3] = (packed & 0xFF) / 255.0f;
+}
+
+/* Byte-based: reads RGBA from memory order. Use for GXColor structs (not N64 DL data). */
+static void pc_unpack_gxcolor_f(u32 color_as_u32, float* out_rgba) {
+    const u8* bytes = (const u8*)&color_as_u32;
+    out_rgba[0] = bytes[0] / 255.0f;
+    out_rgba[1] = bytes[1] / 255.0f;
+    out_rgba[2] = bytes[2] / 255.0f;
+    out_rgba[3] = bytes[3] / 255.0f;
+}
+
+static u32 pc_pack_gxcolor_u32(GXColor color) {
+    return ((u32)color.r) | ((u32)color.g << 8) | ((u32)color.b << 16) | ((u32)color.a << 24);
+}
+
+/* Map tex matrix ID to slot: raw 0..9, GX enum 30..57 (stride 3), or 60=identity */
+static int pc_tex_mtx_id_to_slot(int id) {
+    if (id == GX_IDENTITY) return -1;
+    if (id >= 0 && id < 10) return id;
+    if (id >= GX_TEXMTX0 && id < GX_IDENTITY) return (id - GX_TEXMTX0) / 3;
+    return -1;
+}
+
+/* Commit pending vertex + flush batch to GL. Used by GXBegin/GXEnd/GXCopyDisp/etc. */
+static void pc_gx_commit_pending_and_flush(void) {
+    if (!g_gx.in_begin) return;
+    if (g_gx.vertex_pending && g_gx.current_vertex_idx < PC_GX_MAX_VERTS) {
+        g_gx.vertex_buffer[g_gx.current_vertex_idx] = g_gx.current_vertex;
+        g_gx.current_vertex_idx++;
+        g_gx.vertex_pending = 0;
+    }
+    g_gx.in_begin = 0;
+    if (g_gx.current_vertex_idx > 0)
+        pc_gx_flush_vertices();
+}
+
+/* emu64 omits GXEnd() â€” flush when expected vertex count is reached so the
+ * batch renders with the state it was built with, not subsequent state changes. */
+void pc_gx_flush_if_begin_complete(void) {
+    if (!g_gx.in_begin || g_gx.expected_vertex_count <= 0) return;
+
+    int submitted = g_gx.current_vertex_idx + (g_gx.vertex_pending ? 1 : 0);
+    if (submitted < g_gx.expected_vertex_count) return;
+
+    pc_gx_commit_pending_and_flush();
+}
+
+int pc_emu64_frame_cmds = 0;
+int pc_emu64_frame_crashes = 0;
+int pc_emu64_frame_noop_cmds = 0;
+int pc_emu64_frame_tri_cmds = 0;
+int pc_emu64_frame_vtx_cmds = 0;
+int pc_emu64_frame_dl_cmds = 0;
+int pc_emu64_frame_cull_visible = 0;
+int pc_emu64_frame_cull_rejected = 0;
+
+static int pc_gx_ensure_gl_context(void) {
+    SDL_Window* win = VIGetSDLWindow();
+    SDL_GLContext ctx = VIGetGLContext();
+
+    if (!win || !ctx) {
+        /* Some games call GXInit before VIInit (e.g. Pikmin). */
+        VIInit();
+        win = VIGetSDLWindow();
+        ctx = VIGetGLContext();
+    }
+
+    if (!win || !ctx) {
+        fprintf(stderr, "pc_gx_init: no SDL window/GL context available\n");
+        return 0;
+    }
+
+    VIMakeContextCurrent();
+    if (SDL_GL_GetCurrentContext() != ctx) {
+        fprintf(stderr, "pc_gx_init: GL context is not current after VIMakeContextCurrent (%s)\n", SDL_GetError());
+        return 0;
+    }
+
+    return 1;
+}
+
+void pc_gx_init(void) {
+    if (g_pc_gx_initialized) return;
+
+    if (!pc_gx_ensure_gl_context()) {
+        return;
+    }
+
+    if (!gladLoadGL((GLADloadfunc)SDL_GL_GetProcAddress)) {
+        fprintf(stderr, "pc_gx_init: gladLoadGL failed (current_ctx=%p, glGetString=%p, sdl_err=%s)\n",
+                SDL_GL_GetCurrentContext(), SDL_GL_GetProcAddress("glGetString"), SDL_GetError());
+        return;
+    }
+
+    memset(&g_gx, 0, sizeof(g_gx));
+
+    g_gx.projection_type = GX_PERSPECTIVE;
+    g_gx.num_tev_stages = 1;
+    g_gx.num_chans = 0;
+    g_gx.num_tex_gens = 0;
+    g_gx.cull_mode = GX_CULL_BACK;
+    g_gx.ztex_op = GX_ZT_DISABLE;
+    g_gx.ztex_fmt = GX_TF_Z24X8;
+    g_gx.ztex_bias = 0;
+    g_gx.z_compare_enable = 1;
+    g_gx.z_compare_func = GX_LEQUAL;
+    g_gx.z_update_enable = 1;
+    g_gx.color_update_enable = 1;
+    g_gx.alpha_update_enable = 1;
+    g_gx.alpha_comp0 = GX_ALWAYS;
+    g_gx.alpha_ref0 = 0;
+    g_gx.alpha_op = GX_AOP_AND;
+    g_gx.alpha_comp1 = GX_ALWAYS;
+    g_gx.alpha_ref1 = 0;
+    g_gx.blend_mode = GX_BM_NONE;
+    g_gx.blend_src = GX_BL_ONE;
+    g_gx.blend_dst = GX_BL_ZERO;
+    g_gx.copy_clamp = GX_CLAMP_TOP | GX_CLAMP_BOTTOM;
+    g_gx.copy_aa_enable = 0;
+    g_gx.copy_vf_enable = 0;
+    memset(g_gx.copy_vfilter, 0, sizeof(g_gx.copy_vfilter));
+    g_gx.scissor_offset[0] = 0;
+    g_gx.scissor_offset[1] = 0;
+    g_gx.clear_color[3] = 0.0f;
+    g_gx.clear_depth = 1.0f;
+
+    for (int i = 0; i < 4; i++)
+        g_gx.projection_mtx[i][i] = 1.0f;
+
+    for (int i = 0; i < 10; i++) {
+        g_gx.pos_mtx[i][0][0] = 1.0f;
+        g_gx.pos_mtx[i][1][1] = 1.0f;
+        g_gx.pos_mtx[i][2][2] = 1.0f;
+    }
+
+    for (int i = 0; i < 10; i++) {
+        g_gx.nrm_mtx[i][0][0] = 1.0f;
+        g_gx.nrm_mtx[i][1][1] = 1.0f;
+        g_gx.nrm_mtx[i][2][2] = 1.0f;
+    }
+
+    g_gx.tev_swap_table[0] = (PCGXTevSwapTable){0, 1, 2, 3};
+    g_gx.tev_swap_table[1] = (PCGXTevSwapTable){0, 1, 2, 3};
+    g_gx.tev_swap_table[2] = (PCGXTevSwapTable){0, 1, 2, 3};
+    g_gx.tev_swap_table[3] = (PCGXTevSwapTable){0, 1, 2, 3};
+
+    for (int i = 0; i < 2; i++) {
+        g_gx.chan_mat_color[i][0] = 1.0f;
+        g_gx.chan_mat_color[i][1] = 1.0f;
+        g_gx.chan_mat_color[i][2] = 1.0f;
+        g_gx.chan_mat_color[i][3] = 1.0f;
+    }
+    for (int i = 0; i < 4; i++) {
+        g_gx.chan_ctrl_enable[i] = GX_FALSE;
+        g_gx.chan_ctrl_amb_src[i] = GX_SRC_REG;
+        g_gx.chan_ctrl_mat_src[i] = GX_SRC_VTX;
+        g_gx.chan_ctrl_light_mask[i] = GX_LIGHT_NULL;
+        g_gx.chan_ctrl_diff_fn[i] = GX_DF_NONE;
+        g_gx.chan_ctrl_attn_fn[i] = GX_AF_NONE;
+    }
+
+    /* Hardware-like TEV stage 0 defaults: pass rasterized color/alpha. */
+    g_gx.tev_stages[0].color_a = GX_CC_ZERO;
+    g_gx.tev_stages[0].color_b = GX_CC_ZERO;
+    g_gx.tev_stages[0].color_c = GX_CC_ZERO;
+    g_gx.tev_stages[0].color_d = GX_CC_RASC;
+    g_gx.tev_stages[0].alpha_a = GX_CA_ZERO;
+    g_gx.tev_stages[0].alpha_b = GX_CA_ZERO;
+    g_gx.tev_stages[0].alpha_c = GX_CA_ZERO;
+    g_gx.tev_stages[0].alpha_d = GX_CA_RASA;
+    g_gx.tev_stages[0].color_op = GX_TEV_ADD;
+    g_gx.tev_stages[0].alpha_op = GX_TEV_ADD;
+    g_gx.tev_stages[0].color_bias = GX_TB_ZERO;
+    g_gx.tev_stages[0].alpha_bias = GX_TB_ZERO;
+    g_gx.tev_stages[0].color_scale = GX_CS_SCALE_1;
+    g_gx.tev_stages[0].alpha_scale = GX_CS_SCALE_1;
+    g_gx.tev_stages[0].color_clamp = GX_TRUE;
+    g_gx.tev_stages[0].alpha_clamp = GX_TRUE;
+    g_gx.tev_stages[0].color_out = GX_TEVPREV;
+    g_gx.tev_stages[0].alpha_out = GX_TEVPREV;
+    g_gx.tev_stages[0].tex_coord = GX_TEXCOORD_NULL;
+    g_gx.tev_stages[0].tex_map = GX_TEXMAP_NULL;
+    g_gx.tev_stages[0].color_chan = GX_COLOR0A0;
+
+    /* Quad-to-triangle index buffer */
+    for (int q = 0; q < PC_GX_MAX_VERTS / 4; q++) {
+        int base = q * 4;
+        quad_index_buf[q * 6 + 0] = base + 0;
+        quad_index_buf[q * 6 + 1] = base + 1;
+        quad_index_buf[q * 6 + 2] = base + 2;
+        quad_index_buf[q * 6 + 3] = base + 0;
+        quad_index_buf[q * 6 + 4] = base + 2;
+        quad_index_buf[q * 6 + 5] = base + 3;
+    }
+
+    glGenVertexArrays(1, &g_gx.vao);
+    glGenBuffers(1, &g_gx.vbo);
+    glGenBuffers(1, &g_gx.ebo);
+
+    /* VAO setup: attrib pointers persist since PCGXVertex layout and VBO ID never change */
+    glBindVertexArray(g_gx.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_gx.vbo);
+    glBufferData(GL_ARRAY_BUFFER, PC_GX_MAX_VERTS * sizeof(PCGXVertex), NULL, GL_STREAM_DRAW);
+    {
+        size_t stride = sizeof(PCGXVertex);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, position));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, normal));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void*)offsetof(PCGXVertex, color0));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, texcoord));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, pn_mtx_idx));
+        glEnableVertexAttribArray(5);
+        glVertexAttribPointer(5, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, texcoord[1]));
+        glEnableVertexAttribArray(6);
+        glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, texcoord[2]));
+        glEnableVertexAttribArray(7);
+        glVertexAttribPointer(7, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, texcoord[3]));
+    }
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gx.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(quad_index_buf), quad_index_buf, GL_STATIC_DRAW);
+
+    glBindVertexArray(0);
+
+    pc_gx_tev_init();
+    pc_gx_texture_init();
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glFrontFace(pc_gx_front_face_is_cw() ? GL_CW : GL_CCW);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_MULTISAMPLE);
+
+    g_gx.dirty = PC_GX_DIRTY_ALL;
+    g_pc_gx_initialized = 1;
+}
+
+void pc_gx_begin_frame(void) {
+    if (!g_pc_gx_initialized) {
+        pc_gx_init();
+        if (!g_pc_gx_initialized) return;
+    }
+
+    pc_emu64_frame_cmds = 0;
+    pc_emu64_frame_crashes = 0;
+    pc_emu64_frame_noop_cmds = 0;
+    pc_emu64_frame_tri_cmds = 0;
+    pc_emu64_frame_vtx_cmds = 0;
+    pc_emu64_frame_dl_cmds = 0;
+    pc_emu64_frame_cull_visible = 0;
+    pc_emu64_frame_cull_rejected = 0;
+    pc_gx_draw_call_count = 0;
+    g_pc_widescreen_stretch = 0;
+    /* glClear respects write masks â€” must enable all before clearing */
+    glDepthMask(GL_TRUE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    /* Always clear the full backbuffer regardless of prior GX scissor/viewport state. */
+    glDisable(GL_SCISSOR_TEST);
+#ifdef PC_ENHANCEMENTS
+    pc_gx_update_aspect();
+    glViewport(0, 0, g_pc_window_w, g_pc_window_h);
+#else
+    glViewport(0, 0, PC_GC_WIDTH, PC_GC_HEIGHT);
+#endif
+    glClearDepth(g_gx.clear_depth);
+    glClearColor(g_gx.clear_color[0], g_gx.clear_color[1], g_gx.clear_color[2], g_gx.clear_color[3]);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+void pc_gx_shutdown(void) {
+    pc_gx_tev_shutdown();
+    pc_gx_texture_shutdown();
+#ifdef PC_ENHANCEMENTS
+    pc_gx_efb_capture_cleanup();
+#endif
+
+    if (g_gx.ebo) glDeleteBuffers(1, &g_gx.ebo);
+    if (g_gx.vbo) glDeleteBuffers(1, &g_gx.vbo);
+    if (g_gx.vao) glDeleteVertexArrays(1, &g_gx.vao);
+    g_pc_gx_initialized = 0;
+}
+
+/* --- Vertex Submission --- */
+void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
+    /* Auto-flush previous batch if GXEnd was omitted (normal on real HW) */
+    pc_gx_commit_pending_and_flush();
+
+    g_gx.current_primitive = primitive;
+    g_gx.current_vtxfmt = vtxfmt;
+    g_gx.expected_vertex_count = nverts;
+    g_gx.current_vertex_idx = 0;
+    g_gx.in_begin = 1;
+    g_gx.vertex_pending = 0;
+    memset(&g_gx.current_vertex, 0, sizeof(PCGXVertex));
+    g_gx.current_vertex.color0[0] = 255;
+    g_gx.current_vertex.color0[1] = 255;
+    g_gx.current_vertex.color0[2] = 255;
+    g_gx.current_vertex.color0[3] = 255;
+    g_gx.current_vertex.pn_mtx_idx = (float)g_gx.current_mtx;
+}
+
+void GXEnd(void) {
+    pc_gx_commit_pending_and_flush();
+}
+
+void GXPosition3f32(f32 x, f32 y, f32 z) {
+    /* Deferred commit: position call commits the previous vertex */
+    if (g_gx.vertex_pending && g_gx.current_vertex_idx < PC_GX_MAX_VERTS) {
+        g_gx.vertex_buffer[g_gx.current_vertex_idx] = g_gx.current_vertex;
+        g_gx.current_vertex_idx++;
+    }
+
+    /* Reset vertex but carry last color forward */
+    u8 r = g_gx.current_vertex.color0[0];
+    u8 g = g_gx.current_vertex.color0[1];
+    u8 b = g_gx.current_vertex.color0[2];
+    u8 a = g_gx.current_vertex.color0[3];
+    memset(&g_gx.current_vertex, 0, sizeof(PCGXVertex));
+    g_gx.current_vertex.color0[0] = r;
+    g_gx.current_vertex.color0[1] = g;
+    g_gx.current_vertex.color0[2] = b;
+    g_gx.current_vertex.color0[3] = a;
+    g_gx.current_vertex.pn_mtx_idx = (float)g_gx.current_mtx;
+
+    g_gx.current_vertex.position[0] = x;
+    g_gx.current_vertex.position[1] = y;
+    g_gx.current_vertex.position[2] = z;
+    g_gx.vertex_pending = 1;
+}
+
+void GXPosition3u16(u16 x, u16 y, u16 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
+void GXPosition3s16(s16 x, s16 y, s16 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
+void GXPosition3u8(u8 x, u8 y, u8 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
+void GXPosition3s8(s8 x, s8 y, s8 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
+
+void GXPosition2f32(f32 x, f32 y) { GXPosition3f32(x, y, 0.0f); }
+void GXPosition2u16(u16 x, u16 y) { GXPosition3f32((f32)x, (f32)y, 0.0f); }
+void GXPosition2s16(s16 x, s16 y) { GXPosition3f32((f32)x, (f32)y, 0.0f); }
+void GXPosition2u8(u8 x, u8 y) { GXPosition3f32((f32)x, (f32)y, 0.0f); }
+void GXPosition2s8(s8 x, s8 y) { GXPosition3f32((f32)x, (f32)y, 0.0f); }
+
+static float pc_gx_frac_scale(u8 frac) {
+    return (frac != 0) ? (1.0f / (float)(1u << frac)) : 1.0f;
+}
+
+static void pc_gx_read_position_indexed(const u8* src, u8 cnt, u8 type, u8 frac,
+                                        float* x, float* y, float* z) {
+    float scale = pc_gx_frac_scale(frac);
+    *x = 0.0f;
+    *y = 0.0f;
+    *z = 0.0f;
+
+    switch (type) {
+        case GX_F32: {
+            const float* p = (const float*)src;
+            *x = p[0];
+            *y = p[1];
+            *z = (cnt == GX_POS_XYZ) ? p[2] : 0.0f;
+            break;
+        }
+        case GX_S16: {
+            const s16* p = (const s16*)src;
+            *x = p[0] * scale;
+            *y = p[1] * scale;
+            *z = (cnt == GX_POS_XYZ) ? (p[2] * scale) : 0.0f;
+            break;
+        }
+        case GX_U16: {
+            const u16* p = (const u16*)src;
+            *x = p[0] * scale;
+            *y = p[1] * scale;
+            *z = (cnt == GX_POS_XYZ) ? (p[2] * scale) : 0.0f;
+            break;
+        }
+        case GX_S8: {
+            const s8* p = (const s8*)src;
+            *x = p[0] * scale;
+            *y = p[1] * scale;
+            *z = (cnt == GX_POS_XYZ) ? (p[2] * scale) : 0.0f;
+            break;
+        }
+        case GX_U8:
+        default: {
+            const u8* p = (const u8*)src;
+            *x = p[0] * scale;
+            *y = p[1] * scale;
+            *z = (cnt == GX_POS_XYZ) ? (p[2] * scale) : 0.0f;
+            break;
+        }
+    }
+}
+
+static void pc_gx_read_normal_indexed(const u8* src, u8 type, u8 frac,
+                                      float* x, float* y, float* z) {
+    float scale = pc_gx_frac_scale(frac);
+    *x = 0.0f;
+    *y = 0.0f;
+    *z = 1.0f;
+
+    switch (type) {
+        case GX_F32: {
+            const float* p = (const float*)src;
+            *x = p[0];
+            *y = p[1];
+            *z = p[2];
+            break;
+        }
+        case GX_S16: {
+            const s16* p = (const s16*)src;
+            *x = p[0] * scale;
+            *y = p[1] * scale;
+            *z = p[2] * scale;
+            break;
+        }
+        case GX_U16: {
+            const u16* p = (const u16*)src;
+            *x = p[0] * scale;
+            *y = p[1] * scale;
+            *z = p[2] * scale;
+            break;
+        }
+        case GX_S8: {
+            const s8* p = (const s8*)src;
+            *x = p[0] * scale;
+            *y = p[1] * scale;
+            *z = p[2] * scale;
+            break;
+        }
+        case GX_U8:
+        default: {
+            const u8* p = (const u8*)src;
+            *x = p[0] * scale;
+            *y = p[1] * scale;
+            *z = p[2] * scale;
+            break;
+        }
+    }
+}
+
+static void pc_gx_read_texcoord_indexed(const u8* src, u8 cnt, u8 type, u8 frac,
+                                        float* s, float* t) {
+    float scale = pc_gx_frac_scale(frac);
+    *s = 0.0f;
+    *t = 0.0f;
+
+    switch (type) {
+        case GX_F32: {
+            const float* p = (const float*)src;
+            *s = p[0];
+            *t = (cnt == GX_TEX_ST) ? p[1] : 0.0f;
+            break;
+        }
+        case GX_S16: {
+            const s16* p = (const s16*)src;
+            *s = p[0] * scale;
+            *t = (cnt == GX_TEX_ST) ? (p[1] * scale) : 0.0f;
+            break;
+        }
+        case GX_U16: {
+            const u16* p = (const u16*)src;
+            *s = p[0] * scale;
+            *t = (cnt == GX_TEX_ST) ? (p[1] * scale) : 0.0f;
+            break;
+        }
+        case GX_S8: {
+            const s8* p = (const s8*)src;
+            *s = p[0] * scale;
+            *t = (cnt == GX_TEX_ST) ? (p[1] * scale) : 0.0f;
+            break;
+        }
+        case GX_U8:
+        default: {
+            const u8* p = (const u8*)src;
+            *s = p[0] * scale;
+            *t = (cnt == GX_TEX_ST) ? (p[1] * scale) : 0.0f;
+            break;
+        }
+    }
+}
+
+static void pc_gx_read_color_indexed(const u8* src, u8 cnt, u8 type, u8* out_rgba) {
+    out_rgba[0] = 255;
+    out_rgba[1] = 255;
+    out_rgba[2] = 255;
+    out_rgba[3] = 255;
+
+    switch (type) {
+        case GX_RGB565: {
+            u16 c = 0;
+            memcpy(&c, src, sizeof(c));
+            out_rgba[0] = (u8)(((c >> 11) & 0x1F) * 255 / 31);
+            out_rgba[1] = (u8)(((c >> 5) & 0x3F) * 255 / 63);
+            out_rgba[2] = (u8)((c & 0x1F) * 255 / 31);
+            out_rgba[3] = 255;
+            break;
+        }
+        case GX_RGB8: {
+            out_rgba[0] = src[0];
+            out_rgba[1] = src[1];
+            out_rgba[2] = src[2];
+            out_rgba[3] = 255;
+            break;
+        }
+        case GX_RGBA8:
+        default: {
+            out_rgba[0] = src[0];
+            out_rgba[1] = src[1];
+            out_rgba[2] = src[2];
+            out_rgba[3] = (cnt == GX_CLR_RGBA) ? src[3] : 255;
+            break;
+        }
+    }
+}
+
+void GXPosition1x16(u16 index) {
+    if (g_gx.array_base[GX_VA_POS]) {
+        const u8* base = (const u8*)g_gx.array_base[GX_VA_POS];
+        const u8* src = base + index * g_gx.array_stride[GX_VA_POS];
+        const PCGXVertexFormat* fmt = &g_gx.vtx_fmt[g_gx.current_vtxfmt];
+        u8 cnt = fmt->attr_cnt[GX_VA_POS];
+        u8 type = fmt->attr_type[GX_VA_POS];
+        u8 frac = fmt->attr_frac[GX_VA_POS];
+        float x, y, z;
+
+        if (cnt != GX_POS_XY && cnt != GX_POS_XYZ) cnt = GX_POS_XYZ;
+        pc_gx_read_position_indexed(src, cnt, type, frac, &x, &y, &z);
+        GXPosition3f32(x, y, z);
+    }
+}
+void GXPosition1x8(u8 index) { GXPosition1x16(index); }
+void GXMatrixIndex1x8(u8 index) {
+    u32 slot = (u32)index / 3u;
+    if (slot < 10u) {
+        g_gx.current_mtx = (int)slot;
+        DIRTY(PC_GX_DIRTY_MODELVIEW);
+    }
+}
+void GXMatrixIndex1u8(u8 index) { GXMatrixIndex1x8(index); }
+
+void GXNormal3f32(f32 x, f32 y, f32 z) {
+    g_gx.current_vertex.normal[0] = x;
+    g_gx.current_vertex.normal[1] = y;
+    g_gx.current_vertex.normal[2] = z;
+}
+void GXNormal3s16(s16 x, s16 y, s16 z) {
+    GXNormal3f32(x / 32767.0f, y / 32767.0f, z / 32767.0f);
+}
+void GXNormal3s8(s8 x, s8 y, s8 z) {
+    GXNormal3f32(x / 127.0f, y / 127.0f, z / 127.0f);
+}
+void GXNormal1x16(u16 index) {
+    if (g_gx.array_base[GX_VA_NRM]) {
+        const u8* base = (const u8*)g_gx.array_base[GX_VA_NRM];
+        const u8* src = base + index * g_gx.array_stride[GX_VA_NRM];
+        const PCGXVertexFormat* fmt = &g_gx.vtx_fmt[g_gx.current_vtxfmt];
+        u8 type = fmt->attr_type[GX_VA_NRM];
+        u8 frac = fmt->attr_frac[GX_VA_NRM];
+        float x, y, z;
+
+        pc_gx_read_normal_indexed(src, type, frac, &x, &y, &z);
+        GXNormal3f32(x, y, z);
+    }
+}
+void GXNormal1x8(u8 index) { GXNormal1x16(index); }
+
+void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
+    g_gx.current_vertex.color0[0] = r;
+    g_gx.current_vertex.color0[1] = g;
+    g_gx.current_vertex.color0[2] = b;
+    g_gx.current_vertex.color0[3] = a;
+}
+void GXColor3u8(u8 r, u8 g, u8 b) { GXColor4u8(r, g, b, 255); }
+void GXColor1u32(u32 clr) {
+    GXColor4u8((clr >> 24) & 0xFF, (clr >> 16) & 0xFF, (clr >> 8) & 0xFF, clr & 0xFF);
+}
+void GXColor1u16(u16 clr) { GXColor1u32((u32)clr << 16); }
+void GXColor1x16(u16 index) {
+    if (g_gx.array_base[GX_VA_CLR0]) {
+        const u8* base = (const u8*)g_gx.array_base[GX_VA_CLR0];
+        const u8* src = base + index * g_gx.array_stride[GX_VA_CLR0];
+        const PCGXVertexFormat* fmt = &g_gx.vtx_fmt[g_gx.current_vtxfmt];
+        u8 cnt = fmt->attr_cnt[GX_VA_CLR0];
+        u8 type = fmt->attr_type[GX_VA_CLR0];
+        u8 rgba[4];
+
+        if (cnt != GX_CLR_RGB && cnt != GX_CLR_RGBA) cnt = GX_CLR_RGBA;
+        pc_gx_read_color_indexed(src, cnt, type, rgba);
+        GXColor4u8(rgba[0], rgba[1], rgba[2], rgba[3]);
+    }
+}
+void GXColor1x8(u8 index) { GXColor1x16(index); }
+
+void GXColor4f32(float r, float g, float b, float a) {
+    GXColor4u8((u8)(r * 255.0f + 0.5f), (u8)(g * 255.0f + 0.5f),
+               (u8)(b * 255.0f + 0.5f), (u8)(a * 255.0f + 0.5f));
+}
+
+static void pc_gx_set_texcoord_channel(u32 channel, f32 s, f32 t) {
+    if (channel < 8) {
+        g_gx.current_vertex.texcoord[channel][0] = s;
+        g_gx.current_vertex.texcoord[channel][1] = t;
+    }
+}
+
+void GXTexCoord2f32(f32 s, f32 t) {
+    pc_gx_set_texcoord_channel(0, s, t);
+}
+static float pc_gx_current_texcoord_frac_scale(void) {
+    const PCGXVertexFormat* fmt = &g_gx.vtx_fmt[g_gx.current_vtxfmt];
+    return pc_gx_frac_scale(fmt->attr_frac[GX_VA_TEX0]);
+}
+
+void GXTexCoord2u16(u16 s, u16 t) {
+    float scale = pc_gx_current_texcoord_frac_scale();
+    GXTexCoord2f32((f32)s * scale, (f32)t * scale);
+}
+void GXTexCoord2s16(s16 s, s16 t) {
+    float scale = pc_gx_current_texcoord_frac_scale();
+    GXTexCoord2f32((f32)s * scale, (f32)t * scale);
+}
+void GXTexCoord2u8(u8 s, u8 t) {
+    float scale = pc_gx_current_texcoord_frac_scale();
+    GXTexCoord2f32((f32)s * scale, (f32)t * scale);
+}
+void GXTexCoord2s8(s8 s, s8 t) {
+    float scale = pc_gx_current_texcoord_frac_scale();
+    GXTexCoord2f32((f32)s * scale, (f32)t * scale);
+}
+
+void GXTexCoord1f32(f32 s) { GXTexCoord2f32(s, 0.0f); }
+void GXTexCoord1u16(u16 s) { GXTexCoord2u16(s, 0); }
+void GXTexCoord1s16(s16 s) { GXTexCoord2s16(s, 0); }
+void GXTexCoord1u8(u8 s) { GXTexCoord2u8(s, 0); }
+void GXTexCoord1s8(s8 s) { GXTexCoord2s8(s, 0); }
+
+void GXTexCoord1x16(u16 index) {
+    if (g_gx.array_base[GX_VA_TEX0]) {
+        const u8* base = (const u8*)g_gx.array_base[GX_VA_TEX0];
+        const u8* src = base + index * g_gx.array_stride[GX_VA_TEX0];
+        const PCGXVertexFormat* fmt = &g_gx.vtx_fmt[g_gx.current_vtxfmt];
+        u8 cnt = fmt->attr_cnt[GX_VA_TEX0];
+        u8 type = fmt->attr_type[GX_VA_TEX0];
+        u8 frac = fmt->attr_frac[GX_VA_TEX0];
+        float s, t;
+
+        if (cnt != GX_TEX_S && cnt != GX_TEX_ST) cnt = GX_TEX_ST;
+        pc_gx_read_texcoord_indexed(src, cnt, type, frac, &s, &t);
+        GXTexCoord2f32(s, t);
+    }
+}
+void GXTexCoord1x8(u8 index) { GXTexCoord1x16(index); }
+
+/* --- Uniform Location Cache --- */
+static void pc_gx_cache_uniform_locations(GLuint shader) {
+    char name[48];
+    int i;
+    #define UL(n) glGetUniformLocation(shader, n)
+
+    g_gx.uloc.projection = UL("u_projection");
+    g_gx.uloc.modelview  = UL("u_modelview");
+    g_gx.uloc.normal_mtx = UL("u_normal_mtx");
+    g_gx.uloc.modelview_arr = UL("u_modelview_arr[0]");
+    g_gx.uloc.normal_mtx_arr = UL("u_normal_mtx_arr[0]");
+    g_gx.uloc.use_matrix_array = UL("u_use_matrix_array");
+
+    g_gx.uloc.tev_prev = UL("u_tev_prev");
+    g_gx.uloc.tev_reg0 = UL("u_tev_reg0");
+    g_gx.uloc.tev_reg1 = UL("u_tev_reg1");
+    g_gx.uloc.tev_reg2 = UL("u_tev_reg2");
+
+    g_gx.uloc.num_tev_stages = UL("u_num_tev_stages");
+    for (i = 0; i < PC_GX_MAX_TEV_STAGES; i++) {
+        snprintf(name, sizeof(name), "u_tev%d_color_in", i);
+        g_gx.uloc.tev_color_in[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_alpha_in", i);
+        g_gx.uloc.tev_alpha_in[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_color_op", i);
+        g_gx.uloc.tev_color_op[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_alpha_op", i);
+        g_gx.uloc.tev_alpha_op[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_color_chan", i);
+        g_gx.uloc.tev_color_chan[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_tc_src", i);
+        g_gx.uloc.tev_tc_src[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_ind_cfg", i);
+        g_gx.uloc.tev_ind_cfg[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_ind_wrap", i);
+        g_gx.uloc.tev_ind_wrap[i] = UL(name);
+    }
+
+    g_gx.uloc.kcolor   = UL("u_kcolor");
+    g_gx.uloc.tev_ksel = UL("u_tev_ksel");
+
+    g_gx.uloc.alpha_comp0 = UL("u_alpha_comp0");
+    g_gx.uloc.alpha_ref0  = UL("u_alpha_ref0");
+    g_gx.uloc.alpha_op    = UL("u_alpha_op");
+    g_gx.uloc.alpha_comp1 = UL("u_alpha_comp1");
+    g_gx.uloc.alpha_ref1  = UL("u_alpha_ref1");
+
+    g_gx.uloc.lighting_enabled = UL("u_lighting_enabled");
+    g_gx.uloc.mat_color  = UL("u_mat_color");
+    g_gx.uloc.amb_color  = UL("u_amb_color");
+    g_gx.uloc.chan_mat_src = UL("u_chan_mat_src");
+    g_gx.uloc.chan_amb_src = UL("u_chan_amb_src");
+    g_gx.uloc.lighting_enabled1 = UL("u_lighting_enabled1");
+    g_gx.uloc.mat_color1  = UL("u_mat_color1");
+    g_gx.uloc.amb_color1  = UL("u_amb_color1");
+    g_gx.uloc.chan_mat_src1 = UL("u_chan_mat_src1");
+    g_gx.uloc.chan_amb_src1 = UL("u_chan_amb_src1");
+    g_gx.uloc.chan_diff_fn = UL("u_chan_diff_fn");
+    g_gx.uloc.chan_attn_fn = UL("u_chan_attn_fn");
+    g_gx.uloc.chan_diff_fn1 = UL("u_chan_diff_fn1");
+    g_gx.uloc.chan_attn_fn1 = UL("u_chan_attn_fn1");
+    g_gx.uloc.num_chans  = UL("u_num_chans");
+    g_gx.uloc.alpha_lighting_enabled = UL("u_alpha_lighting_enabled");
+    g_gx.uloc.alpha_mat_src = UL("u_alpha_mat_src");
+    g_gx.uloc.alpha_lighting_enabled1 = UL("u_alpha_lighting_enabled1");
+    g_gx.uloc.alpha_mat_src1 = UL("u_alpha_mat_src1");
+
+    g_gx.uloc.light_mask = UL("u_light_mask");
+    g_gx.uloc.light_mask1 = UL("u_light_mask1");
+    for (i = 0; i < 8; i++) {
+        snprintf(name, sizeof(name), "u_light_pos[%d]", i);
+        g_gx.uloc.light_pos[i] = UL(name);
+        snprintf(name, sizeof(name), "u_light_dir[%d]", i);
+        g_gx.uloc.light_dir[i] = UL(name);
+        snprintf(name, sizeof(name), "u_light_color[%d]", i);
+        g_gx.uloc.light_color[i] = UL(name);
+        snprintf(name, sizeof(name), "u_light_cos_att[%d]", i);
+        g_gx.uloc.light_cos_att[i] = UL(name);
+        snprintf(name, sizeof(name), "u_light_dist_att[%d]", i);
+        g_gx.uloc.light_dist_att[i] = UL(name);
+    }
+
+    for (i = 0; i < 4; i++) {
+        snprintf(name, sizeof(name), "u_texmtx_enable[%d]", i);
+        g_gx.uloc.texmtx_enable[i] = UL(name);
+        snprintf(name, sizeof(name), "u_texmtx_row0[%d]", i);
+        g_gx.uloc.texmtx_row0[i] = UL(name);
+        snprintf(name, sizeof(name), "u_texmtx_row1[%d]", i);
+        g_gx.uloc.texmtx_row1[i] = UL(name);
+        snprintf(name, sizeof(name), "u_texgen_src[%d]", i);
+        g_gx.uloc.texgen_src[i] = UL(name);
+    }
+
+    for (i = 0; i < PC_GX_MAX_TEV_STAGES; i++) {
+        snprintf(name, sizeof(name), "u_use_texture%d", i);
+        g_gx.uloc.use_texture[i] = UL(name);
+        snprintf(name, sizeof(name), "u_texture%d", i);
+        g_gx.uloc.texture[i] = UL(name);
+    }
+
+    g_gx.uloc.num_ind_stages = UL("u_num_ind_stages");
+    for (i = 0; i < 4; i++) {
+        snprintf(name, sizeof(name), "u_ind_tex%d", i);
+        g_gx.uloc.ind_tex[i] = UL(name);
+        snprintf(name, sizeof(name), "u_ind_scale[%d]", i);
+        g_gx.uloc.ind_scale[i] = UL(name);
+    }
+    for (i = 0; i < PC_GX_MAX_TEV_STAGES; i++) {
+        snprintf(name, sizeof(name), "u_ind_mtx_r0[%d]", i);
+        g_gx.uloc.ind_mtx_r0[i] = UL(name);
+        snprintf(name, sizeof(name), "u_ind_mtx_r1[%d]", i);
+        g_gx.uloc.ind_mtx_r1[i] = UL(name);
+    }
+
+    g_gx.uloc.fog_type  = UL("u_fog_type");
+    g_gx.uloc.fog_start = UL("u_fog_start");
+    g_gx.uloc.fog_end   = UL("u_fog_end");
+    g_gx.uloc.fog_color = UL("u_fog_color");
+    g_gx.uloc.ztex_enable = UL("u_ztex_enable");
+    g_gx.uloc.ztex_op = UL("u_ztex_op");
+    g_gx.uloc.ztex_bias = UL("u_ztex_bias");
+
+    /* Per-stage bias/scale/clamp/output */
+    for (i = 0; i < PC_GX_MAX_TEV_STAGES; i++) {
+        snprintf(name, sizeof(name), "u_tev%d_bsc", i);
+        g_gx.uloc.tev_bsc[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_out", i);
+        g_gx.uloc.tev_out[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_swap", i);
+        g_gx.uloc.tev_swap[i] = UL(name);
+    }
+    g_gx.uloc.swap_table = UL("u_swap_table");
+
+    #undef UL
+}
+
+/* --- Vertex Flush --- */
+int pc_gx_draw_call_count = 0;
+
+void pc_gx_flush_vertices(void) {
+    int count = g_gx.current_vertex_idx;
+    if (count == 0) return;
+
+    if (g_pc_gx_dl.active) {
+        pc_gx_dl_record_draw_batch((u32)g_gx.current_primitive, g_gx.vertex_buffer, (u32)count);
+    }
+
+    pc_gx_draw_call_count++;
+
+    GLuint shader = pc_gx_tev_get_shader(&g_gx);
+
+    if (pc_gx_debug_enabled()) {
+        static int debug_prints = 0;
+        if (debug_prints < 40) {
+            const PCGXVertex* v0 = &g_gx.vertex_buffer[0];
+            const float* mv = (const float*)g_gx.pos_mtx[g_gx.current_mtx];
+            const float* p = (const float*)g_gx.projection_mtx;
+            float pos[4] = { v0->position[0], v0->position[1], v0->position[2], 1.0f };
+            float eye[4];
+            float clip[4];
+            float ndc[3] = { 0.0f, 0.0f, 0.0f };
+
+            eye[0] = mv[0] * pos[0] + mv[1] * pos[1] + mv[2] * pos[2] + mv[3] * pos[3];
+            eye[1] = mv[4] * pos[0] + mv[5] * pos[1] + mv[6] * pos[2] + mv[7] * pos[3];
+            eye[2] = mv[8] * pos[0] + mv[9] * pos[1] + mv[10] * pos[2] + mv[11] * pos[3];
+            eye[3] = 1.0f;
+
+            clip[0] = p[0] * eye[0] + p[1] * eye[1] + p[2] * eye[2] + p[3] * eye[3];
+            clip[1] = p[4] * eye[0] + p[5] * eye[1] + p[6] * eye[2] + p[7] * eye[3];
+            clip[2] = p[8] * eye[0] + p[9] * eye[1] + p[10] * eye[2] + p[11] * eye[3];
+            clip[3] = p[12] * eye[0] + p[13] * eye[1] + p[14] * eye[2] + p[15] * eye[3];
+
+            if (fabsf(clip[3]) > 1e-6f) {
+                ndc[0] = clip[0] / clip[3];
+                ndc[1] = clip[1] / clip[3];
+                ndc[2] = clip[2] / clip[3];
+            }
+
+            {
+                char line[512];
+                snprintf(line, sizeof(line),
+                         "[PCGX] draw prim=%u cnt=%d shader=%u pos=(%.2f,%.2f,%.2f) eye=(%.2f,%.2f,%.2f,%.2f) clip=(%.2f,%.2f,%.2f,%.2f) ndc=(%.2f,%.2f,%.2f) mv_t=(%.2f,%.2f,%.2f) alpha=(c0:%d r0:%d op:%d c1:%d r1:%d) chan=(n:%d mat:%d)",
+                         (unsigned)g_gx.current_primitive, count, (unsigned)shader,
+                         pos[0], pos[1], pos[2],
+                         eye[0], eye[1], eye[2], eye[3],
+                         clip[0], clip[1], clip[2], clip[3],
+                         ndc[0], ndc[1], ndc[2],
+                         mv[3], mv[7], mv[11],
+                         g_gx.alpha_comp0, g_gx.alpha_ref0, g_gx.alpha_op, g_gx.alpha_comp1, g_gx.alpha_ref1,
+                         g_gx.num_chans, g_gx.chan_ctrl_mat_src[0]);
+                pc_gx_debug_log(line);
+            }
+            debug_prints++;
+        }
+    }
+
+    if (shader && shader != g_gx.current_shader) {
+        glUseProgram(shader);
+        PC_GL_CHECK("glUseProgram");
+        g_gx.current_shader = shader;
+        pc_gx_cache_uniform_locations(shader);
+        g_gx.dirty = PC_GX_DIRTY_ALL;
+    }
+
+    const PCGXVertex* submit_vertices = g_gx.vertex_buffer;
+    int submit_count = count;
+
+    /* Some desktop drivers are flaky with strip/fan on dynamic streams.
+     * Expand to plain triangles on CPU while preserving winding rules. */
+    if (g_gx.current_primitive == GX_TRIANGLESTRIP && count >= 3) {
+        int disable_strip_odd_swap = pc_gx_disable_strip_odd_swap();
+        int out = 0;
+        for (int i = 0; i < count - 2; i++) {
+            int i0, i1, i2;
+            if (!disable_strip_odd_swap && ((i & 1) != 0)) {
+                i0 = i + 1;
+                i1 = i;
+                i2 = i + 2;
+            } else {
+                i0 = i;
+                i1 = i + 1;
+                i2 = i + 2;
+            }
+            g_pc_gx_expanded_prim[out++] = g_gx.vertex_buffer[i0];
+            g_pc_gx_expanded_prim[out++] = g_gx.vertex_buffer[i1];
+            g_pc_gx_expanded_prim[out++] = g_gx.vertex_buffer[i2];
+        }
+        submit_vertices = g_pc_gx_expanded_prim;
+        submit_count = out;
+    } else if (g_gx.current_primitive == GX_TRIANGLEFAN && count >= 3) {
+        int out = 0;
+        for (int i = 1; i < count - 1; i++) {
+            g_pc_gx_expanded_prim[out++] = g_gx.vertex_buffer[0];
+            g_pc_gx_expanded_prim[out++] = g_gx.vertex_buffer[i];
+            g_pc_gx_expanded_prim[out++] = g_gx.vertex_buffer[i + 1];
+        }
+        submit_vertices = g_pc_gx_expanded_prim;
+        submit_count = out;
+    }
+
+    glBindVertexArray(g_gx.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_gx.vbo);
+    glBufferData(GL_ARRAY_BUFFER, submit_count * sizeof(PCGXVertex), submit_vertices, GL_STREAM_DRAW);
+
+    /* Upload only dirty state groups */
+    if (shader) {
+        GLint loc;
+        unsigned int dirty = g_gx.dirty;
+        #define UL(field) g_gx.uloc.field
+
+        if (dirty & PC_GX_DIRTY_PROJECTION) {
+            loc = UL(projection);
+            if (loc >= 0) glUniformMatrix4fv(loc, 1, GL_TRUE, (float*)g_gx.projection_mtx);
+        }
+
+        if (dirty & PC_GX_DIRTY_MODELVIEW) {
+            loc = UL(modelview);
+            if (loc >= 0) {
+                float mv44[16];
+                const float* src = (const float*)g_gx.pos_mtx[g_gx.current_mtx];
+                mv44[ 0] = src[0]; mv44[ 1] = src[1]; mv44[ 2] = src[2]; mv44[ 3] = src[3];
+                mv44[ 4] = src[4]; mv44[ 5] = src[5]; mv44[ 6] = src[6]; mv44[ 7] = src[7];
+                mv44[ 8] = src[8]; mv44[ 9] = src[9]; mv44[10] = src[10]; mv44[11] = src[11];
+                mv44[12] = 0.0f;   mv44[13] = 0.0f;   mv44[14] = 0.0f;    mv44[15] = 1.0f;
+                glUniformMatrix4fv(loc, 1, GL_TRUE, mv44);
+            }
+            loc = UL(normal_mtx);
+            if (loc >= 0) glUniformMatrix3fv(loc, 1, GL_TRUE, (const float*)g_gx.nrm_mtx[g_gx.current_mtx]);
+
+            loc = UL(modelview_arr);
+            if (loc >= 0) {
+                float mv44_arr[10][16];
+                int m;
+                for (m = 0; m < 10; ++m) {
+                    const float* src = (const float*)g_gx.pos_mtx[m];
+                    mv44_arr[m][0] = src[0];   mv44_arr[m][1] = src[1];   mv44_arr[m][2] = src[2];   mv44_arr[m][3] = src[3];
+                    mv44_arr[m][4] = src[4];   mv44_arr[m][5] = src[5];   mv44_arr[m][6] = src[6];   mv44_arr[m][7] = src[7];
+                    mv44_arr[m][8] = src[8];   mv44_arr[m][9] = src[9];   mv44_arr[m][10] = src[10]; mv44_arr[m][11] = src[11];
+                    mv44_arr[m][12] = 0.0f;    mv44_arr[m][13] = 0.0f;    mv44_arr[m][14] = 0.0f;     mv44_arr[m][15] = 1.0f;
+                }
+                glUniformMatrix4fv(loc, 10, GL_TRUE, &mv44_arr[0][0]);
+            }
+            loc = UL(normal_mtx_arr);
+            if (loc >= 0) {
+                glUniformMatrix3fv(loc, 10, GL_TRUE, (const float*)&g_gx.nrm_mtx[0][0][0]);
+            }
+            loc = UL(use_matrix_array);
+            if (loc >= 0) glUniform1i(loc, 1);
+        }
+
+        if (dirty & PC_GX_DIRTY_TEV_COLORS) {
+            loc = UL(tev_prev); if (loc >= 0) glUniform4fv(loc, 1, g_gx.tev_colors[0]);
+            loc = UL(tev_reg0); if (loc >= 0) glUniform4fv(loc, 1, g_gx.tev_colors[1]);
+            loc = UL(tev_reg1); if (loc >= 0) glUniform4fv(loc, 1, g_gx.tev_colors[2]);
+            loc = UL(tev_reg2); if (loc >= 0) glUniform4fv(loc, 1, g_gx.tev_colors[3]);
+        }
+
+        if (dirty & PC_GX_DIRTY_TEV_STAGES) {
+            loc = UL(num_tev_stages); if (loc >= 0) glUniform1i(loc, g_gx.num_tev_stages);
+            for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < g_gx.num_tev_stages; s++) {
+                PCGXTevStage* ts = &g_gx.tev_stages[s];
+                loc = UL(tev_color_in[s]); if (loc >= 0) glUniform4i(loc, ts->color_a, ts->color_b, ts->color_c, ts->color_d);
+                loc = UL(tev_alpha_in[s]); if (loc >= 0) glUniform4i(loc, ts->alpha_a, ts->alpha_b, ts->alpha_c, ts->alpha_d);
+                loc = UL(tev_color_op[s]); if (loc >= 0) glUniform1i(loc, ts->color_op);
+                loc = UL(tev_alpha_op[s]); if (loc >= 0) glUniform1i(loc, ts->alpha_op);
+                loc = UL(tev_color_chan[s]); if (loc >= 0) glUniform1i(loc, ts->color_chan);
+                loc = UL(tev_bsc[s]);  if (loc >= 0) glUniform4i(loc, ts->color_bias, ts->color_scale, ts->alpha_bias, ts->alpha_scale);
+                loc = UL(tev_out[s]);  if (loc >= 0) glUniform4i(loc, ts->color_clamp, ts->alpha_clamp, ts->color_out, ts->alpha_out);
+                loc = UL(tev_swap[s]); if (loc >= 0) glUniform2i(loc, ts->ras_swap, ts->tex_swap);
+            }
+            loc = UL(tev_ksel);
+            if (loc >= 0) {
+                int ksel[PC_GX_MAX_TEV_STAGES * 3];
+                for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
+                    ksel[s * 3 + 0] = g_gx.tev_stages[s].k_color_sel;
+                    ksel[s * 3 + 1] = g_gx.tev_stages[s].k_alpha_sel;
+                    ksel[s * 3 + 2] = s;
+                }
+                glUniform3iv(loc, PC_GX_MAX_TEV_STAGES, ksel);
+            }
+            for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
+                int tc_src = 0;
+                if (s < g_gx.num_tev_stages) {
+                    int tc = g_gx.tev_stages[s].tex_coord;
+                    if (tc >= GX_TEXCOORD0 && tc <= GX_TEXCOORD3) tc_src = tc;
+                    else tc_src = 0;
+                }
+                loc = UL(tev_tc_src[s]); if (loc >= 0) glUniform1i(loc, tc_src);
+            }
+        }
+
+        if (dirty & PC_GX_DIRTY_SWAP_TABLES) {
+            loc = UL(swap_table);
+            if (loc >= 0) {
+                int sw[16];
+                for (int t = 0; t < 4; t++) {
+                    sw[t*4+0] = g_gx.tev_swap_table[t].r;
+                    sw[t*4+1] = g_gx.tev_swap_table[t].g;
+                    sw[t*4+2] = g_gx.tev_swap_table[t].b;
+                    sw[t*4+3] = g_gx.tev_swap_table[t].a;
+                }
+                glUniform4iv(loc, 4, sw);
+            }
+        }
+
+        if (dirty & PC_GX_DIRTY_KONST) {
+            loc = UL(kcolor); if (loc >= 0) glUniform4fv(loc, 4, (const float*)g_gx.tev_k_colors);
+        }
+
+        if (dirty & PC_GX_DIRTY_ALPHA_CMP) {
+            loc = UL(alpha_comp0); if (loc >= 0) glUniform1i(loc, g_gx.alpha_comp0);
+            loc = UL(alpha_ref0);  if (loc >= 0) glUniform1i(loc, g_gx.alpha_ref0);
+            loc = UL(alpha_op);    if (loc >= 0) glUniform1i(loc, g_gx.alpha_op);
+            loc = UL(alpha_comp1); if (loc >= 0) glUniform1i(loc, g_gx.alpha_comp1);
+            loc = UL(alpha_ref1);  if (loc >= 0) glUniform1i(loc, g_gx.alpha_ref1);
+        }
+
+        if (dirty & PC_GX_DIRTY_LIGHTING) {
+            loc = UL(lighting_enabled); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_enable[0]);
+            loc = UL(mat_color);  if (loc >= 0) glUniform4fv(loc, 1, g_gx.chan_mat_color[0]);
+            loc = UL(amb_color);  if (loc >= 0) glUniform4fv(loc, 1, g_gx.chan_amb_color[0]);
+            loc = UL(chan_mat_src); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_mat_src[0]);
+            loc = UL(chan_amb_src); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_amb_src[0]);
+            loc = UL(chan_diff_fn); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_diff_fn[0]);
+            loc = UL(chan_attn_fn); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_attn_fn[0]);
+
+            loc = UL(lighting_enabled1); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_enable[2]);
+            loc = UL(mat_color1);  if (loc >= 0) glUniform4fv(loc, 1, g_gx.chan_mat_color[1]);
+            loc = UL(amb_color1);  if (loc >= 0) glUniform4fv(loc, 1, g_gx.chan_amb_color[1]);
+            loc = UL(chan_mat_src1); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_mat_src[2]);
+            loc = UL(chan_amb_src1); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_amb_src[2]);
+            loc = UL(chan_diff_fn1); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_diff_fn[2]);
+            loc = UL(chan_attn_fn1); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_attn_fn[2]);
+
+            loc = UL(num_chans);  if (loc >= 0) glUniform1i(loc, g_gx.num_chans);
+            loc = UL(alpha_lighting_enabled); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_enable[1]);
+            loc = UL(alpha_mat_src); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_mat_src[1]);
+            loc = UL(alpha_lighting_enabled1); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_enable[3]);
+            loc = UL(alpha_mat_src1); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_mat_src[3]);
+            {
+                int color_light_mask = g_gx.chan_ctrl_light_mask[0];
+                int color_light_mask1 = g_gx.chan_ctrl_light_mask[2];
+                loc = UL(light_mask); if (loc >= 0) glUniform1i(loc, color_light_mask);
+                loc = UL(light_mask1); if (loc >= 0) glUniform1i(loc, color_light_mask1);
+                float lpos[8][3], ldir[8][3], lcol[8][4], lcos_att[8][3], ldist_att[8][3];
+                for (int i = 0; i < 8; i++) {
+                    memcpy(lpos[i], g_gx.lights[i].pos, sizeof(lpos[i]));
+                    memcpy(ldir[i], g_gx.lights[i].dir, sizeof(ldir[i]));
+                    memcpy(lcol[i], g_gx.lights[i].color, sizeof(lcol[i]));
+                    lcos_att[i][0] = g_gx.lights[i].a0;
+                    lcos_att[i][1] = g_gx.lights[i].a1;
+                    lcos_att[i][2] = g_gx.lights[i].a2;
+                    ldist_att[i][0] = g_gx.lights[i].k0;
+                    ldist_att[i][1] = g_gx.lights[i].k1;
+                    ldist_att[i][2] = g_gx.lights[i].k2;
+                }
+                loc = UL(light_pos[0]);   if (loc >= 0) glUniform3fv(loc, 8, &lpos[0][0]);
+                loc = UL(light_dir[0]);   if (loc >= 0) glUniform3fv(loc, 8, &ldir[0][0]);
+                loc = UL(light_color[0]); if (loc >= 0) glUniform4fv(loc, 8, &lcol[0][0]);
+                loc = UL(light_cos_att[0]);  if (loc >= 0) glUniform3fv(loc, 8, &lcos_att[0][0]);
+                loc = UL(light_dist_att[0]); if (loc >= 0) glUniform3fv(loc, 8, &ldist_att[0][0]);
+            }
+        }
+
+        if (dirty & PC_GX_DIRTY_TEXGEN) {
+            for (int tg = 0; tg < 4; tg++) {
+                int mtx_id = g_gx.tex_gen_mtx[tg];
+                int slot = pc_tex_mtx_id_to_slot(mtx_id);
+                int has_mtx = (slot >= 0 && slot < 10);
+                loc = g_gx.uloc.texmtx_enable[tg]; if (loc >= 0) glUniform1i(loc, has_mtx);
+                if (has_mtx) {
+                    const float* tm = (const float*)g_gx.tex_mtx[slot];
+                    loc = g_gx.uloc.texmtx_row0[tg]; if (loc >= 0) glUniform4f(loc, tm[0], tm[1], tm[2], tm[3]);
+                    loc = g_gx.uloc.texmtx_row1[tg]; if (loc >= 0) glUniform4f(loc, tm[4], tm[5], tm[6], tm[7]);
+                }
+                loc = g_gx.uloc.texgen_src[tg]; if (loc >= 0) glUniform1i(loc, g_gx.tex_gen_src[tg]);
+            }
+        }
+
+        if (dirty & (PC_GX_DIRTY_TEXTURES | PC_GX_DIRTY_TEV_STAGES)) {
+            int use_tex_stage[PC_GX_MAX_TEV_STAGES] = { 0 };
+            GLuint tex_obj_stage[PC_GX_MAX_TEV_STAGES] = { 0 };
+            for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
+                if (s < g_gx.num_tev_stages) {
+                    int tex_map = g_gx.tev_stages[s].tex_map;
+                    if (tex_map >= 0 && tex_map < 8)
+                        tex_obj_stage[s] = g_gx.gl_textures[tex_map];
+                }
+                if (tex_obj_stage[s] != 0) {
+                    use_tex_stage[s] = 1;
+                    glActiveTexture(GL_TEXTURE0 + s);
+                    glBindTexture(GL_TEXTURE_2D, tex_obj_stage[s]);
+                }
+            }
+            for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
+                loc = UL(use_texture[s]);
+                if (loc >= 0) glUniform1i(loc, use_tex_stage[s]);
+                loc = UL(texture[s]);
+                if (loc >= 0) glUniform1i(loc, s);
+            }
+        }
+
+        /* Indirect textures on units after regular TEV stage samplers. */
+        if (dirty & (PC_GX_DIRTY_INDIRECT | PC_GX_DIRTY_TEXTURES)) {
+            loc = UL(num_ind_stages); if (loc >= 0) glUniform1i(loc, g_gx.num_ind_stages);
+            for (int i = 0; i < g_gx.num_ind_stages && i < 4; i++) {
+                int ind_tex_map = g_gx.ind_order[i].tex_map;
+                if (ind_tex_map >= 0 && ind_tex_map < 8) {
+                    GLuint ind_tex = g_gx.gl_textures[ind_tex_map];
+                    if (ind_tex) {
+                        glActiveTexture(GL_TEXTURE0 + PC_GX_MAX_TEV_STAGES + i);
+                        glBindTexture(GL_TEXTURE_2D, ind_tex);
+                    }
+                }
+                loc = UL(ind_tex[i]); if (loc >= 0) glUniform1i(loc, PC_GX_MAX_TEV_STAGES + i);
+                loc = UL(ind_scale[i]);
+                if (loc >= 0) {
+                    float s_scale = 1.0f / (float)(1 << g_gx.ind_order[i].scale_s);
+                    float t_scale = 1.0f / (float)(1 << g_gx.ind_order[i].scale_t);
+                    glUniform2f(loc, s_scale, t_scale);
+                }
+            }
+            for (int i = 0; i < 3; i++) {
+                float scale_val = ldexpf(1.0f, g_gx.ind_mtx_scale[i] + 17) / 1024.0f;
+                float packed[6];
+                for (int j = 0; j < 6; j++)
+                    packed[j] = ((float*)g_gx.ind_mtx[i])[j] * scale_val;
+                loc = UL(ind_mtx_r0[i]); if (loc >= 0) glUniform3f(loc, packed[0], packed[1], packed[2]);
+                loc = UL(ind_mtx_r1[i]); if (loc >= 0) glUniform3f(loc, packed[3], packed[4], packed[5]);
+            }
+            for (int s = 0; s < g_gx.num_tev_stages && s < PC_GX_MAX_TEV_STAGES; s++) {
+                PCGXTevStage* ts = &g_gx.tev_stages[s];
+                loc = UL(tev_ind_cfg[s]);
+                if (loc >= 0) glUniform4i(loc, ts->ind_stage, ts->ind_mtx, ts->ind_bias, ts->ind_alpha);
+                loc = UL(tev_ind_wrap[s]);
+                if (loc >= 0) glUniform3i(loc, ts->ind_wrap_s, ts->ind_wrap_t, ts->ind_add_prev);
+            }
+        }
+        glActiveTexture(GL_TEXTURE0);
+
+        if (dirty & PC_GX_DIRTY_FOG) {
+            loc = UL(fog_type);  if (loc >= 0) glUniform1i(loc, g_gx.fog_type);
+            loc = UL(fog_start); if (loc >= 0) glUniform1f(loc, g_gx.fog_start);
+            loc = UL(fog_end);   if (loc >= 0) glUniform1f(loc, g_gx.fog_end);
+            loc = UL(fog_color);  if (loc >= 0) glUniform4fv(loc, 1, g_gx.fog_color);
+        }
+
+        if (dirty & PC_GX_DIRTY_DEPTH) {
+            float z_bias_nrm = 0.0f;
+            int bias24 = g_gx.ztex_bias & 0x00FFFFFF;
+            if (bias24 & 0x00800000) bias24 |= ~0x00FFFFFF;
+            z_bias_nrm = (float)bias24 / 16777215.0f;
+
+            loc = UL(ztex_enable); if (loc >= 0) glUniform1i(loc, g_gx.ztex_op != GX_ZT_DISABLE);
+            loc = UL(ztex_op);     if (loc >= 0) glUniform1i(loc, g_gx.ztex_op);
+            loc = UL(ztex_bias);   if (loc >= 0) glUniform1f(loc, z_bias_nrm);
+        }
+
+        #undef UL
+    }
+
+    GLenum gl_prim;
+    switch (g_gx.current_primitive) {
+        case GX_QUADS:         gl_prim = GL_TRIANGLES; break;
+        case GX_TRIANGLES:     gl_prim = GL_TRIANGLES; break;
+        case GX_TRIANGLESTRIP: gl_prim = GL_TRIANGLE_STRIP; break;
+        case GX_TRIANGLEFAN:   gl_prim = GL_TRIANGLE_FAN; break;
+        case GX_LINES:         gl_prim = GL_LINES; break;
+        case GX_LINESTRIP:     gl_prim = GL_LINE_STRIP; break;
+        case GX_POINTS:        gl_prim = GL_POINTS; break;
+        default:               gl_prim = GL_TRIANGLES; break;
+    }
+
+    if (g_gx.dirty & PC_GX_DIRTY_DEPTH) {
+        if (g_gx.z_compare_enable) {
+            glEnable(GL_DEPTH_TEST);
+            GLenum zfunc;
+            switch (g_gx.z_compare_func) {
+                case GX_NEVER:   zfunc = GL_NEVER; break;
+                case GX_LESS:    zfunc = GL_LESS; break;
+                case GX_EQUAL:   zfunc = GL_EQUAL; break;
+                case GX_LEQUAL:  zfunc = GL_LEQUAL; break;
+                case GX_GREATER: zfunc = GL_GREATER; break;
+                case GX_NEQUAL:  zfunc = GL_NOTEQUAL; break;
+                case GX_GEQUAL:  zfunc = GL_GEQUAL; break;
+                case GX_ALWAYS:  zfunc = GL_ALWAYS; break;
+                default:         zfunc = GL_LEQUAL; break;
+            }
+            glDepthFunc(zfunc);
+        } else {
+            glDisable(GL_DEPTH_TEST);
+        }
+        glDepthMask(g_gx.z_update_enable ? GL_TRUE : GL_FALSE);
+    }
+
+    if (g_gx.dirty & PC_GX_DIRTY_COLOR_MASK) {
+        glColorMask(
+            g_gx.color_update_enable ? GL_TRUE : GL_FALSE,
+            g_gx.color_update_enable ? GL_TRUE : GL_FALSE,
+            g_gx.color_update_enable ? GL_TRUE : GL_FALSE,
+            g_gx.alpha_update_enable ? GL_TRUE : GL_FALSE
+        );
+    }
+
+    if (g_gx.dirty & PC_GX_DIRTY_CULL) {
+        glFrontFace(pc_gx_front_face_is_cw() ? GL_CW : GL_CCW);
+        switch (g_gx.cull_mode) {
+            case GX_CULL_NONE:  glDisable(GL_CULL_FACE); break;
+            case GX_CULL_FRONT: glEnable(GL_CULL_FACE); glCullFace(GL_FRONT); break;
+            case GX_CULL_BACK:  glEnable(GL_CULL_FACE); glCullFace(GL_BACK); break;
+            case GX_CULL_ALL:   glEnable(GL_CULL_FACE); glCullFace(GL_FRONT_AND_BACK); break;
+        }
+    }
+
+    if (g_gx.dirty & PC_GX_DIRTY_BLEND) {
+        switch (g_gx.blend_mode) {
+            case GX_BM_NONE:
+                glDisable(GL_BLEND);
+                break;
+            case GX_BM_BLEND:
+                glEnable(GL_BLEND);
+                {
+                    GLenum src, dst;
+                    switch (g_gx.blend_src) {
+                        case GX_BL_ZERO:        src = GL_ZERO; break;
+                        case GX_BL_ONE:         src = GL_ONE; break;
+                        case GX_BL_DSTCLR:      src = GL_DST_COLOR; break;
+                        case GX_BL_INVDSTCLR:   src = GL_ONE_MINUS_DST_COLOR; break;
+                        case GX_BL_SRCALPHA:    src = GL_SRC_ALPHA; break;
+                        case GX_BL_INVSRCALPHA: src = GL_ONE_MINUS_SRC_ALPHA; break;
+                        case GX_BL_DSTALPHA:    src = GL_DST_ALPHA; break;
+                        case GX_BL_INVDSTALPHA: src = GL_ONE_MINUS_DST_ALPHA; break;
+                        default:                src = GL_ONE; break;
+                    }
+                    switch (g_gx.blend_dst) {
+                        case GX_BL_ZERO:        dst = GL_ZERO; break;
+                        case GX_BL_ONE:         dst = GL_ONE; break;
+                        case GX_BL_SRCCLR:      dst = GL_SRC_COLOR; break;
+                        case GX_BL_INVSRCCLR:   dst = GL_ONE_MINUS_SRC_COLOR; break;
+                        case GX_BL_SRCALPHA:    dst = GL_SRC_ALPHA; break;
+                        case GX_BL_INVSRCALPHA: dst = GL_ONE_MINUS_SRC_ALPHA; break;
+                        case GX_BL_DSTALPHA:    dst = GL_DST_ALPHA; break;
+                        case GX_BL_INVDSTALPHA: dst = GL_ONE_MINUS_DST_ALPHA; break;
+                        default:                dst = GL_ZERO; break;
+                    }
+                    /* DST_ALPHAâ†’SRC_ALPHA: GC EFB alpha semantics differ from GL */
+                    if (g_gx.blend_src == GX_BL_DSTALPHA && g_gx.blend_dst == GX_BL_INVDSTALPHA) {
+                        src = GL_SRC_ALPHA;
+                        dst = GL_ONE_MINUS_SRC_ALPHA;
+                    }
+                    glBlendFunc(src, dst);
+                }
+                break;
+            case GX_BM_LOGIC:
+                glDisable(GL_BLEND);
+                break;
+            case GX_BM_SUBTRACT:
+                glEnable(GL_BLEND);
+                glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
+                glBlendFunc(GL_ONE, GL_ONE);
+                break;
+        }
+    }
+
+    if (g_gx.copy_aa_enable) {
+        glEnable(GL_MULTISAMPLE);
+    } else {
+        glDisable(GL_MULTISAMPLE);
+    }
+
+    if (submit_vertices == g_pc_gx_expanded_prim) {
+        gl_prim = GL_TRIANGLES;
+    }
+
+    if (g_gx.current_primitive == GX_QUADS) {
+        int num_quads = count / 4;
+        int num_indices = num_quads * 6;
+        glDrawElements(GL_TRIANGLES, num_indices, GL_UNSIGNED_SHORT, 0);
+        PC_GL_CHECK("glDrawElements");
+    } else {
+        glDrawArrays(gl_prim, 0, submit_count);
+        PC_GL_CHECK("glDrawArrays");
+    }
+
+    if (g_gx.blend_mode == GX_BM_SUBTRACT)
+        glBlendEquation(GL_FUNC_ADD);
+
+    g_gx.dirty = 0;
+}
+
+/* --- Vertex Descriptor / Format --- */
+void GXSetVtxDesc(u32 attr, u32 type) {
+    if (attr < PC_GX_MAX_ATTR) g_gx.vtx_desc[attr] = type;
+}
+void GXSetVtxDescv(const void* list) {
+    const u32* p = (const u32*)list;
+    while (p[0] != GX_VA_NULL) {
+        GXSetVtxDesc(p[0], p[1]);
+        p += 2;
+    }
+}
+void GXClearVtxDesc(void) { memset(g_gx.vtx_desc, 0, sizeof(g_gx.vtx_desc)); }
+
+void GXSetVtxAttrFmt(u32 vtxfmt, u32 attr, u32 cnt, u32 type, u8 frac) {
+    if (vtxfmt < GX_MAX_VTXFMT && attr < PC_GX_MAX_ATTR) {
+        PCGXVertexFormat* fmt = &g_gx.vtx_fmt[vtxfmt];
+        fmt->attr_cnt[attr] = (u8)cnt;
+        fmt->attr_type[attr] = (u8)type;
+        fmt->attr_frac[attr] = frac;
+
+        if (attr == GX_VA_POS) fmt->has_position = 1;
+        if (attr == GX_VA_NRM) fmt->has_normal = 1;
+        if (attr == GX_VA_CLR0) fmt->has_color0 = 1;
+        if (attr == GX_VA_CLR1) fmt->has_color1 = 1;
+        if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) {
+            int tc = (int)attr - GX_VA_TEX0;
+            fmt->has_texcoord[tc] = 1;
+            fmt->texcoord_frac[tc] = frac;
+        }
+    }
+}
+
+void GXSetVtxAttrFmtv(u32 vtxfmt, void* list) {
+    if (!list) return;
+    u32* p = (u32*)list;
+    while (p[0] != GX_VA_NULL) {
+        GXSetVtxAttrFmt(vtxfmt, p[0], p[1], p[2], (u8)p[3]);
+        p += 4;
+    }
+}
+
+void GXSetArray(u32 attr, const void* data, u8 stride) {
+    if (attr < GX_VA_MAX_ATTR) {
+        g_gx.array_base[attr] = data;
+        g_gx.array_stride[attr] = stride;
+    }
+}
+
+void GXInvalidateVtxCache(void) { }
+
+/* --- Transforms --- */
+void GXSetProjection(const void* mtx, u32 type) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_PROJECTION);
+    g_gx.projection_type = type;
+    memcpy(g_gx.projection_mtx, mtx, sizeof(float) * 12);
+    /* GX only stores 3 rows â€” 4th row is implicit based on projection type */
+    if (type == GX_PERSPECTIVE) {
+        g_gx.projection_mtx[3][0] = 0.0f;
+        g_gx.projection_mtx[3][1] = 0.0f;
+        g_gx.projection_mtx[3][2] = -1.0f;
+        g_gx.projection_mtx[3][3] = 0.0f;
+    } else { /* GX_ORTHOGRAPHIC */
+        g_gx.projection_mtx[3][0] = 0.0f;
+        g_gx.projection_mtx[3][1] = 0.0f;
+        g_gx.projection_mtx[3][2] = 0.0f;
+        g_gx.projection_mtx[3][3] = 1.0f;
+    }
+
+#ifdef PC_ENHANCEMENTS
+    /* Widescreen: 0=hor+ (both), 1=stretch (none), 2=UI (ortho only) */
+    if (g_pc_widescreen_stretch == 0 ||
+        (g_pc_widescreen_stretch == 2 && type == GX_ORTHOGRAPHIC)) {
+        if (g_aspect_active) {
+            g_gx.projection_mtx[0][0] *= g_aspect_factor;
+        }
+    }
+#endif
+}
+
+void GXSetProjectionv(const f32* ptr) {
+    float mtx[4][4];
+    u32 type;
+
+    if (!ptr) return;
+
+    type = (u32)ptr[0];
+    memset(mtx, 0, sizeof(mtx));
+
+    mtx[0][0] = ptr[1];
+    mtx[1][1] = ptr[3];
+    mtx[2][2] = ptr[5];
+    mtx[2][3] = ptr[6];
+
+    if (type == GX_ORTHOGRAPHIC) {
+        mtx[0][3] = ptr[2];
+        mtx[1][3] = ptr[4];
+        mtx[3][3] = 1.0f;
+    } else {
+        mtx[0][2] = ptr[2];
+        mtx[1][2] = ptr[4];
+        mtx[3][2] = -1.0f;
+    }
+
+    GXSetProjection(mtx, type);
+}
+
+void GXLoadPosMtxImm(const void* mtx, u32 id) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_MODELVIEW);
+    int slot = id / 3;
+    if (slot < 10) memcpy(g_gx.pos_mtx[slot], mtx, sizeof(float) * 12);
+}
+
+void GXLoadNrmMtxImm(const void* mtx, u32 id) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_MODELVIEW);
+    int slot = id / 3;
+    if (slot < 10) {
+        /* Extract upper-left 3x3 from 3x4 row-major Mtx (stride 4, not contiguous) */
+        const float* src = (const float*)mtx;
+        g_gx.nrm_mtx[slot][0][0] = src[0]; g_gx.nrm_mtx[slot][0][1] = src[1]; g_gx.nrm_mtx[slot][0][2] = src[2];
+        g_gx.nrm_mtx[slot][1][0] = src[4]; g_gx.nrm_mtx[slot][1][1] = src[5]; g_gx.nrm_mtx[slot][1][2] = src[6];
+        g_gx.nrm_mtx[slot][2][0] = src[8]; g_gx.nrm_mtx[slot][2][1] = src[9]; g_gx.nrm_mtx[slot][2][2] = src[10];
+    }
+}
+
+void GXLoadTexMtxImm(const void* mtx, u32 id, u32 type) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEXGEN);
+    int slot = pc_tex_mtx_id_to_slot((int)id);
+    if (slot >= 0 && slot < 10) memcpy(g_gx.tex_mtx[slot], mtx, sizeof(float) * 12);
+    (void)type;
+}
+
+void GXLoadPosMtxIndx(u16 index, u32 id) {
+    const u8* base = (const u8*)g_gx.array_base[GX_POS_MTX_ARRAY];
+    u8 stride = g_gx.array_stride[GX_POS_MTX_ARRAY];
+    const void* src;
+
+    if (!base) return;
+    if (stride == 0) stride = (u8)(sizeof(float) * 12);
+    src = base + ((size_t)index * (size_t)stride);
+    GXLoadPosMtxImm(src, id);
+}
+
+void GXLoadNrmMtxIndx3x3(u16 index, u32 id) {
+    const u8* nrm_base = (const u8*)g_gx.array_base[GX_NRM_MTX_ARRAY];
+    u8 nrm_stride = g_gx.array_stride[GX_NRM_MTX_ARRAY];
+    int slot = (int)(id / 3);
+
+    if (slot < 0 || slot >= 10) return;
+
+    if (nrm_base) {
+        const float* src;
+        if (nrm_stride == 0) nrm_stride = (u8)(sizeof(float) * 9);
+        src = (const float*)(nrm_base + ((size_t)index * (size_t)nrm_stride));
+        g_gx.nrm_mtx[slot][0][0] = src[0];
+        g_gx.nrm_mtx[slot][0][1] = src[1];
+        g_gx.nrm_mtx[slot][0][2] = src[2];
+        g_gx.nrm_mtx[slot][1][0] = src[3];
+        g_gx.nrm_mtx[slot][1][1] = src[4];
+        g_gx.nrm_mtx[slot][1][2] = src[5];
+        g_gx.nrm_mtx[slot][2][0] = src[6];
+        g_gx.nrm_mtx[slot][2][1] = src[7];
+        g_gx.nrm_mtx[slot][2][2] = src[8];
+        DIRTY(PC_GX_DIRTY_MODELVIEW);
+        return;
+    }
+
+    /* Fallback: derive from indexed position matrix array entry. */
+    {
+        const u8* pos_base = (const u8*)g_gx.array_base[GX_POS_MTX_ARRAY];
+        u8 pos_stride = g_gx.array_stride[GX_POS_MTX_ARRAY];
+        const void* src;
+        if (!pos_base) return;
+        if (pos_stride == 0) pos_stride = (u8)(sizeof(float) * 12);
+        src = pos_base + ((size_t)index * (size_t)pos_stride);
+        GXLoadNrmMtxImm(src, id);
+    }
+}
+
+void GXLoadTexMtxIndx(u16 index, u32 id, u32 type) {
+    const u8* base = (const u8*)g_gx.array_base[GX_TEX_MTX_ARRAY];
+    u8 stride = g_gx.array_stride[GX_TEX_MTX_ARRAY];
+    const void* src;
+
+    if (!base) return;
+    if (stride == 0) stride = (u8)(sizeof(float) * 12);
+    src = base + ((size_t)index * (size_t)stride);
+    GXLoadTexMtxImm(src, id, type);
+}
+
+void GXSetCurrentMtx(u32 id) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_MODELVIEW);
+    u32 slot = id / 3;
+    if (slot < 10) g_gx.current_mtx = slot;
+}
+
+static void pc_gx_apply_viewport(void) {
+    float left = g_gx.viewport[0] - (float)g_gx.scissor_offset[0];
+    float top = g_gx.viewport[1] - (float)g_gx.scissor_offset[1];
+    float wd = g_gx.viewport[2];
+    float ht = g_gx.viewport[3];
+    float nearz = g_gx.viewport[4];
+    float farz = g_gx.viewport[5];
+
+#ifdef PC_ENHANCEMENTS
+    {
+        float sx = (float)g_pc_window_w / (float)PC_GC_WIDTH;
+        float sy = (float)g_pc_window_h / (float)PC_GC_HEIGHT;
+        float adj_left = left;
+        float adj_wd = wd;
+
+        /* UI mode: remap sub-viewports to match aspect-corrected content */
+        if (g_pc_widescreen_stretch == 2 && g_aspect_active) {
+            int is_full = (g_gx.viewport[0] < 1.0f && g_gx.viewport[1] < 1.0f &&
+                           g_gx.viewport[2] > (float)(PC_GC_WIDTH - 1) &&
+                           g_gx.viewport[3] > (float)(PC_GC_HEIGHT - 1));
+            if (!is_full) {
+                adj_left = g_aspect_offset + left * g_aspect_factor;
+                adj_wd = wd * g_aspect_factor;
+            }
+        }
+
+        int gl_x = (int)(adj_left * sx);
+        int gl_w = (int)(adj_wd * sx);
+        int gl_h = (int)(ht * sy);
+        int gl_y = g_pc_window_h - (int)(top * sy) - gl_h;
+        glViewport(gl_x, gl_y, gl_w, gl_h);
+    }
+#else
+    /* GX is Y-down, GL is Y-up */
+    glViewport((int)left, PC_GC_HEIGHT - (int)top - (int)ht, (int)wd, (int)ht);
+#endif
+    glDepthRange((double)nearz, (double)farz);
+}
+
+void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
+    g_gx.viewport[0] = left;
+    g_gx.viewport[1] = top;
+    g_gx.viewport[2] = wd;
+    g_gx.viewport[3] = ht;
+    g_gx.viewport[4] = nearz;
+    g_gx.viewport[5] = farz;
+    pc_gx_apply_viewport();
+}
+
+void GXSetViewportv(const f32* vp) {
+    if (!vp) return;
+    GXSetViewport(vp[0], vp[1], vp[2], vp[3], vp[4], vp[5]);
+}
+
+void GXGetViewportv(f32* vp) {
+    if (!vp) return;
+    memcpy(vp, g_gx.viewport, sizeof(f32) * 6);
+}
+
+void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz, u32 field) {
+    (void)field;
+    GXSetViewport(left, top, wd, ht, nearz, farz);
+}
+
+static void pc_gx_apply_scissor(void) {
+    int left = g_gx.scissor[0] - g_gx.scissor_offset[0];
+    int top = g_gx.scissor[1] - g_gx.scissor_offset[1];
+    int wd = g_gx.scissor[2];
+    int ht = g_gx.scissor[3];
+
+    if (wd <= 0 || ht <= 0) {
+        glDisable(GL_SCISSOR_TEST);
+        return;
+    }
+
+    if (left < 0) {
+        wd += left;
+        left = 0;
+    }
+    if (top < 0) {
+        ht += top;
+        top = 0;
+    }
+
+    if (left >= PC_GC_WIDTH || top >= PC_GC_HEIGHT) {
+        glDisable(GL_SCISSOR_TEST);
+        return;
+    }
+    if (left + wd > PC_GC_WIDTH) wd = PC_GC_WIDTH - left;
+    if (top + ht > PC_GC_HEIGHT) ht = PC_GC_HEIGHT - top;
+
+    if (wd <= 0 || ht <= 0) {
+        glDisable(GL_SCISSOR_TEST);
+        return;
+    }
+
+    glEnable(GL_SCISSOR_TEST);
+#ifdef PC_ENHANCEMENTS
+    {
+        float sx = (float)g_pc_window_w / (float)PC_GC_WIDTH;
+        float sy = (float)g_pc_window_h / (float)PC_GC_HEIGHT;
+        int gl_x = (int)(left * sx);
+        int gl_w = (int)(wd * sx);
+        int gl_h = (int)(ht * sy);
+        int gl_y = g_pc_window_h - (int)(top * sy) - gl_h;
+        glScissor(gl_x, gl_y, gl_w, gl_h);
+    }
+#else
+    /* GX is Y-down, GL is Y-up */
+    glScissor(left, PC_GC_HEIGHT - top - ht, wd, ht);
+#endif
+}
+
+void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht) {
+    g_gx.scissor[0] = left;
+    g_gx.scissor[1] = top;
+    g_gx.scissor[2] = wd;
+    g_gx.scissor[3] = ht;
+    pc_gx_apply_scissor();
+}
+
+void GXSetScissorBoxOffset(s32 x, s32 y) {
+    g_gx.scissor_offset[0] = x;
+    g_gx.scissor_offset[1] = y;
+    pc_gx_apply_viewport();
+    pc_gx_apply_scissor();
+}
+void GXSetClipMode(u32 mode) { (void)mode; }
+
+void GXGetProjectionv(f32* p) {
+    if (!p) return;
+
+    p[0] = (f32)g_gx.projection_type;
+    p[1] = g_gx.projection_mtx[0][0];
+    p[3] = g_gx.projection_mtx[1][1];
+    p[5] = g_gx.projection_mtx[2][2];
+    p[6] = g_gx.projection_mtx[2][3];
+
+    if (g_gx.projection_type == GX_ORTHOGRAPHIC) {
+        p[2] = g_gx.projection_mtx[0][3];
+        p[4] = g_gx.projection_mtx[1][3];
+    } else {
+        p[2] = g_gx.projection_mtx[0][2];
+        p[4] = g_gx.projection_mtx[1][2];
+    }
+}
+
+void GXProject(f32 x, f32 y, f32 z, f32 mtx[3][4], f32* pm, f32* vp, f32* sx, f32* sy, f32* sz) {
+    f32 eye_x;
+    f32 eye_y;
+    f32 eye_z;
+    f32 xc;
+    f32 yc;
+    f32 zc;
+    f32 wc;
+
+    if (!mtx || !pm || !vp || !sx || !sy || !sz) return;
+
+    eye_x = mtx[0][3] + ((mtx[0][2] * z) + ((mtx[0][0] * x) + (mtx[0][1] * y)));
+    eye_y = mtx[1][3] + ((mtx[1][2] * z) + ((mtx[1][0] * x) + (mtx[1][1] * y)));
+    eye_z = mtx[2][3] + ((mtx[2][2] * z) + ((mtx[2][0] * x) + (mtx[2][1] * y)));
+
+    if (pm[0] == 0.0f) {
+        xc = (eye_x * pm[1]) + (eye_z * pm[2]);
+        yc = (eye_y * pm[3]) + (eye_z * pm[4]);
+        zc = pm[6] + (eye_z * pm[5]);
+        wc = 1.0f / -eye_z;
+    } else {
+        xc = pm[2] + (eye_x * pm[1]);
+        yc = pm[4] + (eye_y * pm[3]);
+        zc = pm[6] + (eye_z * pm[5]);
+        wc = 1.0f;
+    }
+
+    *sx = (vp[2] / 2.0f) + (vp[0] + (wc * (xc * vp[2] / 2.0f)));
+    *sy = (vp[3] / 2.0f) + (vp[1] + (wc * (-yc * vp[3] / 2.0f)));
+    *sz = vp[5] + (wc * (zc * (vp[5] - vp[4])));
+}
+
+void GXGetVtxDesc(u32 attr, u32* type) {
+    if (!type) return;
+    if (attr < PC_GX_MAX_ATTR) {
+        *type = (u32)g_gx.vtx_desc[attr];
+    } else {
+        *type = GX_NONE;
+    }
+}
+
+void GXGetVtxDescv(void* list) {
+    GXVtxDescList* out = (GXVtxDescList*)list;
+    u32 n = 0;
+    u32 attr;
+
+    if (!out) return;
+    for (attr = GX_VA_PNMTXIDX; attr < GX_VA_MAX_ATTR && n < (GX_MAX_VTXDESCLIST_SZ - 1); ++attr) {
+        u32 type = (u32)g_gx.vtx_desc[attr];
+        if (type == GX_NONE) continue;
+        out[n].attr = (GXAttr)attr;
+        out[n].type = (GXAttrType)type;
+        ++n;
+    }
+    out[n].attr = GX_VA_NULL;
+    out[n].type = GX_NONE;
+}
+
+void GXGetVtxAttrFmt(u32 idx, u32 attr, u32* compCnt, u32* compType, u8* shift) {
+    if (idx < GX_MAX_VTXFMT && attr < PC_GX_MAX_ATTR) {
+        const PCGXVertexFormat* fmt = &g_gx.vtx_fmt[idx];
+        if (compCnt) *compCnt = fmt->attr_cnt[attr];
+        if (compType) *compType = fmt->attr_type[attr];
+        if (shift) *shift = fmt->attr_frac[attr];
+        return;
+    }
+    if (compCnt) *compCnt = 0;
+    if (compType) *compType = 0;
+    if (shift) *shift = 0;
+}
+
+/* --- TEV Configuration --- */
+void GXSetNumTevStages(u8 nStages) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEV_STAGES);
+    g_gx.num_tev_stages = nStages;
+}
+
+void GXSetTevOp(u32 stage, u32 mode) {
+    pc_gx_flush_if_begin_complete();
+    if (stage >= 16) return;
+
+    /* TEV formula: out = (d + ((1-c)*a + c*b) + bias) * scale */
+    switch (mode) {
+    case GX_MODULATE:
+        GXSetTevColorIn(stage, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO);
+        GXSetTevAlphaIn(stage, GX_CA_ZERO, GX_CA_TEXA, GX_CA_RASA, GX_CA_ZERO);
+        break;
+    case GX_DECAL:
+        GXSetTevColorIn(stage, GX_CC_RASC, GX_CC_TEXC, GX_CC_TEXA, GX_CC_ZERO);
+        GXSetTevAlphaIn(stage, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+        break;
+    case GX_BLEND:
+        GXSetTevColorIn(stage, GX_CC_ONE, GX_CC_RASC, GX_CC_TEXC, GX_CC_ZERO);
+        GXSetTevAlphaIn(stage, GX_CA_ZERO, GX_CA_TEXA, GX_CA_RASA, GX_CA_ZERO);
+        break;
+    case GX_REPLACE:
+        GXSetTevColorIn(stage, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
+        GXSetTevAlphaIn(stage, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA);
+        break;
+    case GX_PASSCLR:
+        GXSetTevColorIn(stage, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_RASC);
+        GXSetTevAlphaIn(stage, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+        break;
+    default:
+        return;
+    }
+    GXSetTevColorOp(stage, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+    GXSetTevAlphaOp(stage, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+}
+
+void GXSetTevColorIn(u32 stage, u32 a, u32 b, u32 c, u32 d) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEV_STAGES);
+    if (stage < 16) {
+        g_gx.tev_stages[stage].color_a = a;
+        g_gx.tev_stages[stage].color_b = b;
+        g_gx.tev_stages[stage].color_c = c;
+        g_gx.tev_stages[stage].color_d = d;
+    }
+}
+
+void GXSetTevAlphaIn(u32 stage, u32 a, u32 b, u32 c, u32 d) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEV_STAGES);
+    if (stage < 16) {
+        g_gx.tev_stages[stage].alpha_a = a;
+        g_gx.tev_stages[stage].alpha_b = b;
+        g_gx.tev_stages[stage].alpha_c = c;
+        g_gx.tev_stages[stage].alpha_d = d;
+    }
+}
+
+void GXSetTevColorOp(u32 stage, u32 op, u32 bias, u32 scale, GXBool clamp, u32 out_reg) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEV_STAGES);
+    if (stage < 16) {
+        g_gx.tev_stages[stage].color_op = op;
+        g_gx.tev_stages[stage].color_bias = bias;
+        g_gx.tev_stages[stage].color_scale = scale;
+        g_gx.tev_stages[stage].color_clamp = clamp;
+        g_gx.tev_stages[stage].color_out = out_reg;
+    }
+}
+
+void GXSetTevAlphaOp(u32 stage, u32 op, u32 bias, u32 scale, GXBool clamp, u32 out_reg) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEV_STAGES);
+    if (stage < 16) {
+        g_gx.tev_stages[stage].alpha_op = op;
+        g_gx.tev_stages[stage].alpha_bias = bias;
+        g_gx.tev_stages[stage].alpha_scale = scale;
+        g_gx.tev_stages[stage].alpha_clamp = clamp;
+        g_gx.tev_stages[stage].alpha_out = out_reg;
+    }
+}
+
+void GXSetTevOrder(u32 stage, u32 coord, u32 map, u32 color) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEXTURES);
+    if (stage < 16) {
+        g_gx.tev_stages[stage].tex_coord = coord;
+        g_gx.tev_stages[stage].tex_map = map;
+        g_gx.tev_stages[stage].color_chan = color;
+
+        /*
+         * GX demos commonly use:
+         *   stage0 = REPLACE (tex0 color),
+         *   stage1 = PASSCLR with COLOR_NULL while using tex1 only for Z-texture.
+         * On hardware this effectively preserves previous color on stage1.
+         * If we keep PASSCLR routed through RASC with COLOR_NULL, the stage resolves
+         * to white and overwrites stage0, producing solid white billboards.
+         */
+        if (color == GX_COLOR_NULL) {
+            PCGXTevStage* tev = &g_gx.tev_stages[stage];
+            if (tev->color_a == GX_CC_ZERO && tev->color_b == GX_CC_ZERO &&
+                tev->color_c == GX_CC_ZERO && tev->color_d == GX_CC_RASC &&
+                tev->alpha_a == GX_CA_ZERO && tev->alpha_b == GX_CA_ZERO &&
+                tev->alpha_c == GX_CA_ZERO && tev->alpha_d == GX_CA_RASA) {
+                tev->color_d = GX_CC_CPREV;
+                tev->alpha_d = GX_CA_APREV;
+            }
+        }
+    }
+}
+
+void GXSetTevColor(u32 id, u32 color_packed) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEV_COLORS);
+    /* TEVREG0 uses GXColor fields (byte unpack), others come from EmuColor.raw (shift unpack) */
+    if (id < GX_MAX_TEVREG) {
+        if (id == GX_TEVREG0) {
+            pc_unpack_gxcolor_f(color_packed, g_gx.tev_colors[id]);
+        } else {
+            pc_unpack_rgba8f(color_packed, g_gx.tev_colors[id]);
+        }
+    }
+}
+
+void GXSetTevColorS10(u32 id, s16 r, s16 g, s16 b, s16 a) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEV_COLORS);
+    if (id < GX_MAX_TEVREG) {
+        g_gx.tev_colors[id][0] = r / 255.0f;
+        g_gx.tev_colors[id][1] = g / 255.0f;
+        g_gx.tev_colors[id][2] = b / 255.0f;
+        g_gx.tev_colors[id][3] = a / 255.0f;
+    }
+}
+
+void GXSetTevKColor(u32 id, u32 color_packed) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_KONST);
+    if (id < 4) {
+        pc_unpack_rgba8f(color_packed, g_gx.tev_k_colors[id]);
+    }
+}
+
+void GXSetTevKColorSel(u32 stage, u32 sel) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEV_STAGES);
+    if (stage < 16) g_gx.tev_stages[stage].k_color_sel = sel;
+}
+void GXSetTevKAlphaSel(u32 stage, u32 sel) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEV_STAGES);
+    if (stage < 16) g_gx.tev_stages[stage].k_alpha_sel = sel;
+}
+
+void GXSetTevSwapMode(u32 stage, u32 ras_sel, u32 tex_sel) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEV_STAGES);
+    if (stage < 16) {
+        g_gx.tev_stages[stage].ras_swap = ras_sel;
+        g_gx.tev_stages[stage].tex_swap = tex_sel;
+    }
+}
+
+void GXSetTevSwapModeTable(u32 table, u32 red, u32 green, u32 blue, u32 alpha) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_SWAP_TABLES);
+    if (table < 4) {
+        g_gx.tev_swap_table[table].r = red;
+        g_gx.tev_swap_table[table].g = green;
+        g_gx.tev_swap_table[table].b = blue;
+        g_gx.tev_swap_table[table].a = alpha;
+    }
+}
+
+/* --- Alpha / Depth / Blend --- */
+void GXSetAlphaCompare(u32 comp0, u8 ref0, u32 op, u32 comp1, u8 ref1) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_ALPHA_CMP);
+    g_gx.alpha_comp0 = comp0;
+    g_gx.alpha_ref0 = ref0;
+    g_gx.alpha_op = op;
+    g_gx.alpha_comp1 = comp1;
+    g_gx.alpha_ref1 = ref1;
+}
+
+void GXSetBlendMode(u32 type, u32 src, u32 dst, u32 logic_op) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_BLEND);
+    g_gx.blend_mode = type;
+    g_gx.blend_src = src;
+    g_gx.blend_dst = dst;
+    g_gx.blend_logic_op = logic_op;
+}
+
+void GXSetZMode(GXBool compare_enable, u32 func, GXBool update_enable) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_DEPTH);
+    g_gx.z_compare_enable = compare_enable;
+    g_gx.z_compare_func = func;
+    g_gx.z_update_enable = update_enable;
+}
+
+void GXSetColorUpdate(GXBool enable) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_COLOR_MASK);
+    g_gx.color_update_enable = enable;
+}
+void GXSetAlphaUpdate(GXBool enable) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_COLOR_MASK);
+    g_gx.alpha_update_enable = enable;
+}
+void GXSetZCompLoc(GXBool before_tex) { (void)before_tex; }
+void GXSetDither(GXBool dither) { (void)dither; }
+void GXSetDstAlpha(GXBool enable, u8 alpha) { (void)enable; (void)alpha; }
+void GXSetFieldMask(GXBool odd, GXBool even) { (void)odd; (void)even; }
+void GXSetFieldMode(GXBool field_mode, GXBool half_aspect) { (void)field_mode; (void)half_aspect; }
+void GXSetPixelFmt(u32 pix_fmt, u32 z_fmt) { (void)pix_fmt; (void)z_fmt; }
+
+void GXSetCullMode(u32 mode) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_CULL);
+    g_gx.cull_mode = g_pc_model_viewer_no_cull ? GX_CULL_NONE : mode;
+}
+void GXSetCoPlanar(GXBool enable) { (void)enable; }
+
+/* --- Fog --- */
+void GXSetFog(u32 type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor color) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_FOG);
+    g_gx.fog_type = type;
+    g_gx.fog_start = startz;
+    g_gx.fog_end = endz;
+    g_gx.fog_near = nearz;
+    g_gx.fog_far = farz;
+    g_gx.fog_color[0] = color.r / 255.0f;
+    g_gx.fog_color[1] = color.g / 255.0f;
+    g_gx.fog_color[2] = color.b / 255.0f;
+    g_gx.fog_color[3] = color.a / 255.0f;
+}
+
+void GXSetFogColor(GXColor color) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_FOG);
+    g_gx.fog_color[0] = color.r / 255.0f;
+    g_gx.fog_color[1] = color.g / 255.0f;
+    g_gx.fog_color[2] = color.b / 255.0f;
+    g_gx.fog_color[3] = color.a / 255.0f;
+}
+
+void GXInitFogAdjTable(void* table, u16 width, f32 projmtx[4][4]) {
+    (void)table; (void)width; (void)projmtx;
+}
+void GXSetFogRangeAdj(GXBool enable, u16 center, void* table) {
+    (void)enable; (void)center; (void)table;
+}
+
+/* --- Lighting --- */
+static int pc_gx_chan_index(u32 chan) {
+    switch (chan) {
+        case GX_COLOR0:
+        case GX_ALPHA0:
+        case GX_COLOR0A0:
+            return 0;
+        case GX_COLOR1:
+        case GX_ALPHA1:
+        case GX_COLOR1A1:
+            return 1;
+        default:
+            return -1;
+    }
+}
+
+void GXSetNumChans(u8 nChans) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_LIGHTING);
+    g_gx.num_chans = nChans;
+}
+
+void GXSetChanCtrl(u32 chan, GXBool enable, u32 amb_src, u32 mat_src,
+                   u32 light_mask, u32 diff_fn, u32 attn_fn) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_LIGHTING);
+    int idx = pc_gx_chan_index(chan);
+    if (idx >= 0) {
+        int is_combined = (chan == GX_COLOR0A0 || chan == GX_COLOR1A1);
+        int is_alpha = (chan == GX_ALPHA0 || chan == GX_ALPHA1);
+
+        if (!is_alpha || is_combined) {
+            g_gx.chan_ctrl_enable[idx * 2] = enable;
+            g_gx.chan_ctrl_amb_src[idx * 2] = amb_src;
+            g_gx.chan_ctrl_mat_src[idx * 2] = mat_src;
+            g_gx.chan_ctrl_light_mask[idx * 2] = light_mask;
+            /* Match GX HW register behavior: spec attenuation forces DF_NONE. */
+            g_gx.chan_ctrl_diff_fn[idx * 2] = (attn_fn == GX_AF_SPEC) ? GX_DF_NONE : diff_fn;
+            g_gx.chan_ctrl_attn_fn[idx * 2] = attn_fn;
+        }
+        if (is_alpha || is_combined) {
+            g_gx.chan_ctrl_enable[idx * 2 + 1] = enable;
+            g_gx.chan_ctrl_amb_src[idx * 2 + 1] = amb_src;
+            g_gx.chan_ctrl_mat_src[idx * 2 + 1] = mat_src;
+            g_gx.chan_ctrl_light_mask[idx * 2 + 1] = light_mask;
+            /* Match GX HW register behavior: spec attenuation forces DF_NONE. */
+            g_gx.chan_ctrl_diff_fn[idx * 2 + 1] = (attn_fn == GX_AF_SPEC) ? GX_DF_NONE : diff_fn;
+            g_gx.chan_ctrl_attn_fn[idx * 2 + 1] = attn_fn;
+        }
+    }
+}
+
+void GXSetChanAmbColor(u32 chan, GXColor color) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_LIGHTING);
+    int idx = pc_gx_chan_index(chan);
+    if (idx >= 0 && idx < 2) {
+        float r = color.r / 255.0f;
+        float g = color.g / 255.0f;
+        float b = color.b / 255.0f;
+        float a = color.a / 255.0f;
+        if (chan == GX_COLOR0 || chan == GX_COLOR1) {
+            g_gx.chan_amb_color[idx][0] = r;
+            g_gx.chan_amb_color[idx][1] = g;
+            g_gx.chan_amb_color[idx][2] = b;
+        } else if (chan == GX_ALPHA0 || chan == GX_ALPHA1) {
+            g_gx.chan_amb_color[idx][3] = a;
+        } else {
+            g_gx.chan_amb_color[idx][0] = r;
+            g_gx.chan_amb_color[idx][1] = g;
+            g_gx.chan_amb_color[idx][2] = b;
+            g_gx.chan_amb_color[idx][3] = a;
+        }
+    }
+}
+
+void GXSetChanMatColor(u32 chan, GXColor color) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_LIGHTING);
+    int idx = pc_gx_chan_index(chan);
+    if (idx >= 0 && idx < 2) {
+        float r = color.r / 255.0f;
+        float g = color.g / 255.0f;
+        float b = color.b / 255.0f;
+        float a = color.a / 255.0f;
+        if (chan == GX_COLOR0 || chan == GX_COLOR1) {
+            g_gx.chan_mat_color[idx][0] = r;
+            g_gx.chan_mat_color[idx][1] = g;
+            g_gx.chan_mat_color[idx][2] = b;
+        } else if (chan == GX_ALPHA0 || chan == GX_ALPHA1) {
+            g_gx.chan_mat_color[idx][3] = a;
+        } else {
+            g_gx.chan_mat_color[idx][0] = r;
+            g_gx.chan_mat_color[idx][1] = g;
+            g_gx.chan_mat_color[idx][2] = b;
+            g_gx.chan_mat_color[idx][3] = a;
+        }
+    }
+}
+
+/* GXLightObj internal layout (from GXPriv.h) */
+typedef struct {
+    u32 padding[3];
+    u32 color;
+    f32 a0, a1, a2;
+    f32 k0, k1, k2;
+    f32 px, py, pz;
+    f32 nx, ny, nz;
+} PCGXLightObjInternal;
+
+static void pc_gx_lightobj_defaults(PCGXLightObjInternal* l) {
+    if (!l) return;
+    l->a0 = 1.0f; l->a1 = 0.0f; l->a2 = 0.0f;
+    l->k0 = 1.0f; l->k1 = 0.0f; l->k2 = 0.0f;
+    l->nx = 0.0f; l->ny = 0.0f; l->nz = -1.0f;
+}
+
+static int pc_gx_lightobj_coeffs_valid(const PCGXLightObjInternal* l) {
+    float spot_sum;
+    float dist_sum;
+    const float lim = 1.0e6f;
+    if (!l) return 0;
+    if (!isfinite(l->a0) || !isfinite(l->a1) || !isfinite(l->a2)) return 0;
+    if (!isfinite(l->k0) || !isfinite(l->k1) || !isfinite(l->k2)) return 0;
+    if (fabsf(l->a0) > lim || fabsf(l->a1) > lim || fabsf(l->a2) > lim) return 0;
+    if (fabsf(l->k0) > lim || fabsf(l->k1) > lim || fabsf(l->k2) > lim) return 0;
+    /* Zeroed GXLightObj is common on PC; treat zero coeff blocks as uninitialized. */
+    spot_sum = fabsf(l->a0) + fabsf(l->a1) + fabsf(l->a2);
+    dist_sum = fabsf(l->k0) + fabsf(l->k1) + fabsf(l->k2);
+    if (spot_sum < 1.0e-8f) return 0;
+    if (dist_sum < 1.0e-8f) return 0;
+    return 1;
+}
+
+static void pc_gx_lightobj_sanitize(PCGXLightObjInternal* l) {
+    if (!l) return;
+    if (!pc_gx_lightobj_coeffs_valid(l)) {
+        pc_gx_lightobj_defaults(l);
+    }
+    if (!isfinite(l->nx) || !isfinite(l->ny) || !isfinite(l->nz)) {
+        l->nx = 0.0f; l->ny = 0.0f; l->nz = -1.0f;
+    }
+}
+
+void GXInitLightSpot(void* lt, f32 cutoff, u32 spot_func) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    f32 a0, a1, a2, r, cr, d;
+
+    if (cutoff <= 0.0f || cutoff > 90.0f)
+        spot_func = GX_SP_OFF;
+
+    r = PC_PIf * cutoff / 180.0f;
+    cr = cosf(r);
+    switch (spot_func) {
+    case GX_SP_FLAT:
+        a0 = -1000.0f * cr;
+        a1 = 1000.0f;
+        a2 = 0.0f;
+        break;
+    case GX_SP_COS:
+        a0 = -cr / (1.0f - cr);
+        a1 = 1.0f / (1.0f - cr);
+        a2 = 0.0f;
+        break;
+    case GX_SP_COS2:
+        a0 = 0.0f;
+        a1 = -cr / (1.0f - cr);
+        a2 = 1.0f / (1.0f - cr);
+        break;
+    case GX_SP_SHARP:
+        d = (1.0f - cr) * (1.0f - cr);
+        a0 = (cr * (cr - 2.0f)) / d;
+        a1 = 2.0f / d;
+        a2 = -1.0f / d;
+        break;
+    case GX_SP_RING1:
+        d = (1.0f - cr) * (1.0f - cr);
+        a0 = (-4.0f * cr) / d;
+        a1 = (4.0f * (1.0f + cr)) / d;
+        a2 = -4.0f / d;
+        break;
+    case GX_SP_RING2:
+        d = (1.0f - cr) * (1.0f - cr);
+        a0 = 1.0f - ((2.0f * cr * cr) / d);
+        a1 = (4.0f * cr) / d;
+        a2 = -2.0f / d;
+        break;
+    case GX_SP_OFF:
+    default:
+        a0 = 1.0f;
+        a1 = 0.0f;
+        a2 = 0.0f;
+        break;
+    }
+    l->a0 = a0; l->a1 = a1; l->a2 = a2;
+}
+void GXInitLightDistAttn(void* lt, f32 ref_dist, f32 ref_bright, u32 dist_func) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    f32 k0, k1, k2;
+
+    if (ref_dist < 0.0f)
+        dist_func = GX_DA_OFF;
+    if (ref_bright <= 0.0f || ref_bright >= 1.0f)
+        dist_func = GX_DA_OFF;
+
+    switch (dist_func) {
+    case GX_DA_GENTLE:
+        k0 = 1.0f;
+        k1 = (1.0f - ref_bright) / (ref_bright * ref_dist);
+        k2 = 0.0f;
+        break;
+    case GX_DA_MEDIUM:
+        k0 = 1.0f;
+        k1 = (0.5f * (1.0f - ref_bright)) / (ref_bright * ref_dist);
+        k2 = (0.5f * (1.0f - ref_bright)) / (ref_bright * ref_dist * ref_dist);
+        break;
+    case GX_DA_STEEP:
+        k0 = 1.0f;
+        k1 = 0.0f;
+        k2 = (1.0f - ref_bright) / (ref_bright * ref_dist * ref_dist);
+        break;
+    case GX_DA_OFF:
+    default:
+        k0 = 1.0f;
+        k1 = 0.0f;
+        k2 = 0.0f;
+        break;
+    }
+    l->k0 = k0; l->k1 = k1; l->k2 = k2;
+}
+void GXInitLightPos(void* lt, f32 x, f32 y, f32 z) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    pc_gx_lightobj_sanitize(l);
+    l->px = x; l->py = y; l->pz = z;
+}
+void GXInitLightDir(void* lt, f32 nx, f32 ny, f32 nz) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    pc_gx_lightobj_sanitize(l);
+    l->nx = -nx; l->ny = -ny; l->nz = -nz;
+}
+void GXInitSpecularDir(void* lt, f32 nx, f32 ny, f32 nz) {
+    const f32 gx_large_number = -1.0e18f;
+    f32 hx = -nx;
+    f32 hy = -ny;
+    f32 hz = -nz + 1.0f;
+    f32 mag = hx * hx + hy * hy + hz * hz;
+    if (mag != 0.0f) {
+        mag = 1.0f / sqrtf(mag);
+    }
+
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    l->px = nx * gx_large_number;
+    l->py = ny * gx_large_number;
+    l->pz = nz * gx_large_number;
+    l->nx = hx * mag;
+    l->ny = hy * mag;
+    l->nz = hz * mag;
+}
+void GXInitSpecularDirHA(void* lt, f32 nx, f32 ny, f32 nz, f32 hx, f32 hy, f32 hz) {
+    const f32 gx_large_number = -1.0e18f;
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    pc_gx_lightobj_sanitize(l);
+    l->px = nx * gx_large_number;
+    l->py = ny * gx_large_number;
+    l->pz = nz * gx_large_number;
+    l->nx = hx;
+    l->ny = hy;
+    l->nz = hz;
+}
+void GXInitLightColor(void* lt, GXColor color) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    pc_gx_lightobj_sanitize(l);
+    l->color = pc_pack_gxcolor_u32(color);
+}
+void GXInitLightAttn(void* lt, f32 a0, f32 a1, f32 a2, f32 k0, f32 k1, f32 k2) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    l->a0 = a0; l->a1 = a1; l->a2 = a2;
+    l->k0 = k0; l->k1 = k1; l->k2 = k2;
+}
+void GXInitLightAttnA(void* lt, f32 a0, f32 a1, f32 a2) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    l->a0 = a0; l->a1 = a1; l->a2 = a2;
+}
+void GXInitLightAttnK(void* lt, f32 k0, f32 k1, f32 k2) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    l->k0 = k0; l->k1 = k1; l->k2 = k2;
+}
+void GXLoadLightObjImm(void* lt, u32 light) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_LIGHTING);
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    int slot = -1;
+    for (int i = 0; i < 8; i++) {
+        if (light == (1u << i)) { slot = i; break; }
+    }
+    if (slot < 0) return;
+    pc_gx_lightobj_sanitize(l);
+
+    g_gx.lights[slot].pos[0] = l->px;
+    g_gx.lights[slot].pos[1] = l->py;
+    g_gx.lights[slot].pos[2] = l->pz;
+    g_gx.lights[slot].dir[0] = l->nx;
+    g_gx.lights[slot].dir[1] = l->ny;
+    g_gx.lights[slot].dir[2] = l->nz;
+    g_gx.lights[slot].a0 = l->a0;
+    g_gx.lights[slot].a1 = l->a1;
+    g_gx.lights[slot].a2 = l->a2;
+    g_gx.lights[slot].k0 = l->k0;
+    g_gx.lights[slot].k1 = l->k1;
+    g_gx.lights[slot].k2 = l->k2;
+    pc_unpack_gxcolor_f(l->color, g_gx.lights[slot].color);
+}
+void GXGetLightPos(void* lt, f32* x, f32* y, f32* z) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    *x = l->px; *y = l->py; *z = l->pz;
+}
+void GXGetLightAttnA(void* lt, f32* a0, f32* a1, f32* a2) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    if (a0) *a0 = l->a0;
+    if (a1) *a1 = l->a1;
+    if (a2) *a2 = l->a2;
+}
+void GXGetLightAttnK(void* lt, f32* k0, f32* k1, f32* k2) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    if (k0) *k0 = l->k0;
+    if (k1) *k1 = l->k1;
+    if (k2) *k2 = l->k2;
+}
+void GXGetLightDir(void* lt, f32* nx, f32* ny, f32* nz) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    if (nx) *nx = -l->nx;
+    if (ny) *ny = -l->ny;
+    if (nz) *nz = -l->nz;
+}
+void GXGetLightColor(void* lt, GXColor* color) {
+    PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
+    if (color) {
+        const u8* bytes = (const u8*)&l->color;
+        color->r = bytes[0];
+        color->g = bytes[1];
+        color->b = bytes[2];
+        color->a = bytes[3];
+    }
+}
+
+/* --- Texture Coordinate Generation --- */
+void GXSetNumTexGens(u8 n) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEXGEN);
+    g_gx.num_tex_gens = n;
+}
+void GXSetTexCoordGen2(u32 dst, u32 func, u32 src, u32 mtx, GXBool normalize, u32 postmtx) {
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEXGEN);
+    if (dst < 8) {
+        g_gx.tex_gen_type[dst] = func;
+        g_gx.tex_gen_src[dst] = src;
+        g_gx.tex_gen_mtx[dst] = mtx;
+    }
+}
+void GXSetLineWidth(u8 width, u32 texOffsets) { glLineWidth(width / 16.0f); }
+void GXSetPointSize(u8 size, u32 texOffsets) { glPointSize(size / 16.0f); }
+void GXEnableTexOffsets(u32 coord, GXBool line, GXBool point) {
+    (void)coord; (void)line; (void)point;
+}
+void GXSetTexCoordScaleManually(u32 coord, GXBool enable, u16 ss, u16 ts) {
+    (void)coord; (void)enable; (void)ss; (void)ts;
+}
+void GXSetTexCoordBias(u32 coord, u8 s, u8 t) { (void)coord; (void)s; (void)t; }
+
+/* --- Framebuffer / Copy --- */
+void GXSetCopyClear(GXColor clear_clr, u32 clear_z) {
+    g_gx.clear_color[0] = clear_clr.r / 255.0f;
+    g_gx.clear_color[1] = clear_clr.g / 255.0f;
+    g_gx.clear_color[2] = clear_clr.b / 255.0f;
+    g_gx.clear_color[3] = clear_clr.a / 255.0f;
+    g_gx.clear_depth = clear_z / (float)0x00FFFFFF;
+}
+
+static int pc_gx_calc_read_region(const int src[4], int* read_left, int* read_top, int* read_wd, int* read_ht) {
+    int left = src[0];
+    int top = src[1];
+    int wd = src[2];
+    int ht = src[3];
+
+    if (wd <= 0 || ht <= 0) return 0;
+
+#ifdef PC_ENHANCEMENTS
+    {
+        float sx = (float)g_pc_window_w / (float)PC_GC_WIDTH;
+        float sy = (float)g_pc_window_h / (float)PC_GC_HEIGHT;
+        left = (int)(left * sx);
+        top = (int)(top * sy);
+        wd = (int)(wd * sx);
+        ht = (int)(ht * sy);
+    }
+#endif
+
+    if (left < 0) { wd += left; left = 0; }
+    if (top < 0) { ht += top; top = 0; }
+    if (left + wd > g_pc_window_w) wd = g_pc_window_w - left;
+    if (top + ht > g_pc_window_h) ht = g_pc_window_h - top;
+    if (wd <= 0 || ht <= 0) return 0;
+
+    *read_left = left;
+    *read_top = top;
+    *read_wd = wd;
+    *read_ht = ht;
+    return 1;
+}
+
+static void pc_gx_clear_copy_rect(const int src[4], GXBool clear_depth);
+
+static int pc_gx_is_writable_range(const void* ptr, size_t size) {
+    if (!ptr || size == 0) return 0;
+#ifdef _WIN32
+    const u8* p = (const u8*)ptr;
+    size_t remaining = size;
+
+    while (remaining > 0) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery((LPCVOID)p, &mbi, sizeof(mbi)) == 0) {
+            return 0;
+        }
+        if (mbi.State != MEM_COMMIT) {
+            return 0;
+        }
+        if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) {
+            return 0;
+        }
+
+        u8* region_end = (u8*)mbi.BaseAddress + mbi.RegionSize;
+        size_t chunk = (size_t)(region_end - p);
+        if (chunk > remaining) chunk = remaining;
+        p += chunk;
+        remaining -= chunk;
+    }
+    return 1;
+#else
+    return 1;
+#endif
+}
+
+static int pc_gx_resolve_ring_target(void* dest, size_t total_px, u16** out_base, size_t* out_start_px) {
+    uintptr_t dest_addr = (uintptr_t)dest;
+    uintptr_t fb1 = (uintptr_t)DemoFrameBuffer1;
+    uintptr_t fb2 = (uintptr_t)DemoFrameBuffer2;
+    size_t fb_bytes = total_px * sizeof(u16);
+    int dest_is_low32 = 1;
+
+#if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
+    dest_is_low32 = ((dest_addr >> 32) == 0);
+#endif
+
+    if (DemoFrameBuffer1 && dest_addr >= fb1 && dest_addr < fb1 + fb_bytes) {
+        *out_base = (u16*)DemoFrameBuffer1;
+        *out_start_px = (dest_addr - fb1) / sizeof(u16);
+        return 1;
+    }
+    if (DemoFrameBuffer2 && dest_addr >= fb2 && dest_addr < fb2 + fb_bytes) {
+        *out_base = (u16*)DemoFrameBuffer2;
+        *out_start_px = (dest_addr - fb2) / sizeof(u16);
+        return 1;
+    }
+
+    if (dest_is_low32 && DemoCurrentBuffer) {
+        uintptr_t cur_base = (uintptr_t)DemoCurrentBuffer;
+        u32 delta32 = (u32)dest_addr - (u32)cur_base;
+        uintptr_t candidate = cur_base + (uintptr_t)delta32;
+
+        if (DemoCurrentBuffer == DemoFrameBuffer1 && candidate >= fb1 && candidate < fb1 + fb_bytes) {
+            *out_base = (u16*)DemoFrameBuffer1;
+            *out_start_px = (candidate - fb1) / sizeof(u16);
+            return 1;
+        }
+        if (DemoCurrentBuffer == DemoFrameBuffer2 && candidate >= fb2 && candidate < fb2 + fb_bytes) {
+            *out_base = (u16*)DemoFrameBuffer2;
+            *out_start_px = (candidate - fb2) / sizeof(u16);
+            return 1;
+        }
+    }
+
+    /* frb-aa-full uses (u32) pointer math; recover when destination got truncated to 32-bit. */
+    if (dest_is_low32) {
+        u32 low = (u32)dest_addr;
+        if (DemoFrameBuffer1) {
+            uintptr_t base = (uintptr_t)DemoFrameBuffer1;
+            uintptr_t candidate = (base & ~((uintptr_t)0xFFFFFFFFu)) | (uintptr_t)low;
+            if (candidate >= base && candidate < base + fb_bytes) {
+                *out_base = (u16*)DemoFrameBuffer1;
+                *out_start_px = (candidate - base) / sizeof(u16);
+                return 1;
+            }
+        }
+        if (DemoFrameBuffer2) {
+            uintptr_t base = (uintptr_t)DemoFrameBuffer2;
+            uintptr_t candidate = (base & ~((uintptr_t)0xFFFFFFFFu)) | (uintptr_t)low;
+            if (candidate >= base && candidate < base + fb_bytes) {
+                *out_base = (u16*)DemoFrameBuffer2;
+                *out_start_px = (candidate - base) / sizeof(u16);
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static void pc_gx_copy_disp_to_memory(void* dest, const u8* rgba, int read_wd, int read_ht, int out_wd, int out_ht) {
+    int stride_px = g_gx.copy_dst[0] > 0 ? (int)VIPadFrameBufferWidth((u16)g_gx.copy_dst[0]) : out_wd;
+    int fb_ht = g_gx.copy_dst[1] > 0 ? g_gx.copy_dst[1] : out_ht;
+
+    if (stride_px <= 0) stride_px = out_wd;
+    if (fb_ht <= 0) fb_ht = out_ht;
+    if (stride_px <= 0 || fb_ht <= 0) return;
+
+    size_t total_px = (size_t)stride_px * (size_t)fb_ht;
+    u16* ring_base = NULL;
+    size_t start_px = 0;
+    int resolved_ring = pc_gx_resolve_ring_target(dest, total_px, &ring_base, &start_px);
+    if (!resolved_ring) {
+        size_t bytes_needed = (size_t)out_wd * (size_t)out_ht * sizeof(u16);
+        if (!pc_gx_is_writable_range(dest, bytes_needed)) {
+            return;
+        }
+    }
+
+    /* frb-aa-full bottom pass:
+     *   clamp = bottom
+     *   src   = (0,2,w,efb-2)
+     *   dest  = xfb + (efb-2) lines
+     *
+     * On GC this sequence is used to place the second pass into the bottom
+     * half of the displayed XFB. Emulate that placement directly so the top
+     * half from pass 1 is preserved.
+     */
+    if (ring_base &&
+        g_gx.copy_clamp == GX_CLAMP_BOTTOM &&
+        g_gx.copy_src[1] == 2 &&
+        g_gx.copy_src[3] >= fb_ht - 2 &&
+        start_px == (size_t)stride_px * (size_t)(fb_ht - 2)) {
+        int rows = fb_ht / 2;
+        int dst_row0 = fb_ht - rows;
+        int src_rows = read_ht / 2;
+        if (rows <= 0 || src_rows <= 0) return;
+
+        for (int y = 0; y < rows; y++) {
+            /* Sample the upper half of this readback (contains bottom-pass image). */
+            int src_y = (read_ht - 1) - ((y * src_rows) / rows);
+            int dst_row = dst_row0 + y;
+            for (int x = 0; x < out_wd && x < stride_px; x++) {
+                int src_x = (x * read_wd) / out_wd;
+                const u8* p = &rgba[(src_y * read_wd + src_x) * 4];
+                u16 rgb565 = (u16)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3));
+                ring_base[(size_t)dst_row * (size_t)stride_px + (size_t)x] = rgb565;
+            }
+        }
+        return;
+    }
+
+    for (int y = 0; y < out_ht; y++) {
+        int src_y = (y * read_ht) / out_ht;
+        src_y = read_ht - 1 - src_y;
+        for (int x = 0; x < out_wd; x++) {
+            int src_x = (x * read_wd) / out_wd;
+            const u8* p = &rgba[(src_y * read_wd + src_x) * 4];
+            u16 rgb565 = (u16)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3));
+
+            if (ring_base) {
+                size_t dst_idx = start_px + (size_t)y * (size_t)stride_px + (size_t)x;
+                ring_base[dst_idx % total_px] = rgb565;
+            } else {
+                ((u16*)dest)[(size_t)y * (size_t)out_wd + (size_t)x] = rgb565;
+            }
+        }
+    }
+}
+
+static void pc_gx_clear_copy_src(void) {
+    pc_gx_clear_copy_rect(g_gx.copy_src, GX_TRUE);
+}
+
+void GXCopyDisp(void* dest, GXBool clear) {
+    pc_gx_commit_pending_and_flush();
+
+    if (dest) {
+        int read_left = 0, read_top = 0, read_wd = 0, read_ht = 0;
+        if (pc_gx_calc_read_region(g_gx.copy_src, &read_left, &read_top, &read_wd, &read_ht)) {
+            int gl_y = g_pc_window_h - (read_top + read_ht);
+            if (gl_y >= 0) {
+                size_t rgba_size = (size_t)read_wd * (size_t)read_ht * 4;
+                u8* rgba = (u8*)malloc(rgba_size);
+                if (rgba) {
+                    /* XFB destination dimensions come from GXSetDispCopyDst(),
+                     * not the EFB source rectangle. Using copy_src here causes
+                     * partial/stale writes that look like frame ghosting. */
+                    int out_wd = g_gx.copy_dst[0];
+                    int out_ht = g_gx.copy_dst[1];
+                    if (out_wd <= 0) out_wd = g_gx.copy_src[2];
+                    if (out_ht <= 0) out_ht = g_gx.copy_src[3];
+                    if (out_wd <= 0) out_wd = read_wd;
+                    if (out_ht <= 0) out_ht = read_ht;
+
+                    glReadBuffer(GL_BACK);
+                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                    glReadPixels(read_left, gl_y, read_wd, read_ht, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+                    pc_gx_copy_disp_to_memory(dest, rgba, read_wd, read_ht, out_wd, out_ht);
+                    free(rgba);
+                }
+            }
+        }
+    }
+
+    if (clear) {
+        pc_gx_clear_copy_src();
+    }
+}
+
+void GXSetDispCopyGamma(u32 gamma) { (void)gamma; }
+void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+    g_gx.copy_src[0] = left; g_gx.copy_src[1] = top;
+    g_gx.copy_src[2] = wd; g_gx.copy_src[3] = ht;
+}
+void GXSetDispCopyDst(u16 wd, u16 ht) { g_gx.copy_dst[0] = wd; g_gx.copy_dst[1] = ht; }
+f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight) {
+    return (f32)xfbHeight / (f32)efbHeight;
+}
+u32 GXSetDispCopyYScale(f32 vscale) { return (u32)(vscale * 256.0f); }
+u16 GXGetNumXfbLines(u16 efbHeight, f32 yScale) { return (u16)(efbHeight * yScale); }
+void GXSetCopyFilter(GXBool aa, const void* pattern, GXBool vf, const void* vfilter) {
+    if (g_pc_gx_dl.active) {
+        u32 op = PCGX_DL_OP_COPY_FILTER;
+        pc_gx_dl_write(&op, sizeof(op));
+        return;
+    }
+    (void)pattern;
+    g_gx.copy_aa_enable = aa ? 1 : 0;
+    g_gx.copy_vf_enable = vf ? 1 : 0;
+    if (vfilter) {
+        memcpy(g_gx.copy_vfilter, vfilter, sizeof(g_gx.copy_vfilter));
+    } else {
+        memset(g_gx.copy_vfilter, 0, sizeof(g_gx.copy_vfilter));
+    }
+}
+void GXAdjustForOverscan(void* rmin, void* rmout, u16 hor, u16 ver) {
+    memcpy(rmout, rmin, sizeof(u32) * 16);
+}
+
+static inline u8 pc_gx_luma_u8(const u8* p) {
+    /* Integer luma approximation (0.299, 0.587, 0.114). */
+    return (u8)((p[0] * 77 + p[1] * 150 + p[2] * 29 + 128) >> 8);
+}
+
+static inline u8 pc_gx_q3(u8 v) { return (u8)((v * 7 + 127) / 255); }
+static inline u8 pc_gx_q4(u8 v) { return (u8)((v * 15 + 127) / 255); }
+static inline u8 pc_gx_q5(u8 v) { return (u8)((v * 31 + 127) / 255); }
+static inline u8 pc_gx_q6(u8 v) { return (u8)((v * 63 + 127) / 255); }
+
+static inline u16 pc_gx_pack_rgb565(const u8* p) {
+    return (u16)((pc_gx_q5(p[0]) << 11) | (pc_gx_q6(p[1]) << 5) | pc_gx_q5(p[2]));
+}
+
+static inline u16 pc_gx_pack_rgb5a3(const u8* p) {
+    /*
+     * GX RGB5A3:
+     *   bit15=1: 1RRRRRGGGGGBBBBB (opaque)
+     *   bit15=0: 0AAARRRRGGGGBBBB (with alpha)
+     */
+    if (p[3] >= 224) {
+        return (u16)(0x8000 | (pc_gx_q5(p[0]) << 10) | (pc_gx_q5(p[1]) << 5) | pc_gx_q5(p[2]));
+    }
+    return (u16)((pc_gx_q3(p[3]) << 12) | (pc_gx_q4(p[0]) << 8) | (pc_gx_q4(p[1]) << 4) | pc_gx_q4(p[2]));
+}
+
+static inline void pc_gx_store_be16(u8* out, u16 v) {
+    out[0] = (u8)((v >> 8) & 0xFF);
+    out[1] = (u8)(v & 0xFF);
+}
+
+static void pc_gx_clear_copy_rect(const int src[4], GXBool clear_depth) {
+    int read_left = 0, read_top = 0, read_wd = 0, read_ht = 0;
+    if (!pc_gx_calc_read_region(src, &read_left, &read_top, &read_wd, &read_ht)) {
+        return;
+    }
+
+    int gl_y = g_pc_window_h - (read_top + read_ht);
+    if (gl_y < 0) return;
+
+    GLboolean had_scissor = glIsEnabled(GL_SCISSOR_TEST);
+    GLint old_scissor[4] = {0};
+    GLboolean old_depth_mask = GL_TRUE;
+    GLboolean old_color_mask[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+
+    glGetIntegerv(GL_SCISSOR_BOX, old_scissor);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &old_depth_mask);
+    glGetBooleanv(GL_COLOR_WRITEMASK, old_color_mask);
+
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(read_left, gl_y, read_wd, read_ht);
+    glDepthMask(GL_TRUE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearDepth(g_gx.clear_depth);
+    glClearColor(g_gx.clear_color[0], g_gx.clear_color[1], g_gx.clear_color[2], g_gx.clear_color[3]);
+    if (clear_depth) {
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    } else {
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+
+    glDepthMask(old_depth_mask);
+    glColorMask(old_color_mask[0], old_color_mask[1], old_color_mask[2], old_color_mask[3]);
+    if (had_scissor) {
+        glScissor(old_scissor[0], old_scissor[1], old_scissor[2], old_scissor[3]);
+    } else {
+        glDisable(GL_SCISSOR_TEST);
+    }
+}
+
+static void pc_gx_copy_tex_execute(void* dest, GXBool clear) {
+    pc_gx_commit_pending_and_flush();
+
+    if (!dest) return;
+
+    /* Source rectangle (EFB readback) comes from GXSetTexCopySrc. */
+    int src_wd = g_gx.tex_copy_src[2];
+    int src_ht = g_gx.tex_copy_src[3];
+    if (src_wd <= 0 || src_ht <= 0) return;
+
+    /*
+     * Destination texture dimensions come from GXSetTexCopyDst.
+     * frb-copy with box filter (mipmap flag) sets dst = src/2.
+     * Using src dims here overruns destination allocations.
+     */
+    int out_wd = g_gx.tex_copy_dst[0] > 0 ? g_gx.tex_copy_dst[0] : src_wd;
+    int out_ht = g_gx.tex_copy_dst[1] > 0 ? g_gx.tex_copy_dst[1] : src_ht;
+    if (out_wd <= 0 || out_ht <= 0) return;
+    if (out_wd > 4096 || out_ht > 4096) return;
+
+#ifdef PC_ENHANCEMENTS
+    /* Scale readback coordinates from GC coords to window resolution */
+    float sx = (float)g_pc_window_w / (float)PC_GC_WIDTH;
+    float sy = (float)g_pc_window_h / (float)PC_GC_HEIGHT;
+    int read_left = (int)(g_gx.tex_copy_src[0] * sx);
+    int read_top  = (int)(g_gx.tex_copy_src[1] * sy);
+    int read_wd   = (int)(src_wd * sx);
+    int read_ht   = (int)(src_ht * sy);
+#else
+    int read_left = g_gx.tex_copy_src[0];
+    int read_top  = g_gx.tex_copy_src[1];
+    int read_wd   = src_wd;
+    int read_ht   = src_ht;
+#endif
+
+    if (read_left < 0) { read_wd += read_left; read_left = 0; }
+    if (read_top < 0)  { read_ht += read_top;  read_top = 0; }
+    if (read_left + read_wd > g_pc_window_w) read_wd = g_pc_window_w - read_left;
+    if (read_top + read_ht > g_pc_window_h)  read_ht = g_pc_window_h - read_top;
+    if (read_wd <= 0 || read_ht <= 0) return;
+
+    int gl_y = g_pc_window_h - (read_top + read_ht);
+    if (gl_y < 0) return;
+    u32 fmt = g_gx.tex_copy_fmt;
+
+#ifndef PC_ENHANCEMENTS
+    /*
+     * Z24X8 copy path: read depth buffer and store 24-bit depth into an RGBA8-like
+     * tiled layout so GX_TF_Z24X8 can be sampled as RGB bytes in the shader.
+     */
+    if (fmt == GX_TF_Z24X8) {
+        size_t z_size = (size_t)read_wd * (size_t)read_ht * sizeof(float);
+        float* zbuf = (float*)malloc(z_size);
+        if (!zbuf) return;
+
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(read_left, gl_y, read_wd, read_ht, GL_DEPTH_COMPONENT, GL_FLOAT, zbuf);
+
+        {
+            u8* out = (u8*)dest;
+            int bw = (out_wd + 3) / 4;
+            int bh = (out_ht + 3) / 4;
+            for (int by = 0; by < bh; by++) {
+                for (int bx = 0; bx < bw; bx++) {
+                    u8 ar[16][2];
+                    u8 gb[16][2];
+                    memset(ar, 0, sizeof(ar));
+                    memset(gb, 0, sizeof(gb));
+
+                    for (int i = 0; i < 16; i++) {
+                        int x = i & 3;
+                        int y = i >> 2;
+                        int px = bx * 4 + x;
+                        int py = by * 4 + y;
+                        if (px < out_wd && py < out_ht) {
+                            int src_x = px * read_wd / out_wd;
+                            int src_y = read_ht - 1 - (py * read_ht / out_ht);
+                            float z = zbuf[src_y * read_wd + src_x];
+                            if (z < 0.0f) z = 0.0f;
+                            if (z > 1.0f) z = 1.0f;
+                            u32 z24 = (u32)(z * 16777215.0f + 0.5f);
+                            ar[i][0] = 0xFF;
+                            ar[i][1] = (u8)((z24 >> 16) & 0xFF);
+                            gb[i][0] = (u8)((z24 >> 8) & 0xFF);
+                            gb[i][1] = (u8)(z24 & 0xFF);
+                        }
+                    }
+                    for (int i = 0; i < 16; i++) {
+                        out[0] = ar[i][0];
+                        out[1] = ar[i][1];
+                        out += 2;
+                    }
+                    for (int i = 0; i < 16; i++) {
+                        out[0] = gb[i][0];
+                        out[1] = gb[i][1];
+                        out += 2;
+                    }
+                }
+            }
+        }
+
+        free(zbuf);
+        if (clear) {
+            pc_gx_clear_copy_rect(g_gx.tex_copy_src, GX_FALSE);
+        }
+        return;
+    }
+#endif
+
+    size_t rgba_size = (size_t)read_wd * (size_t)read_ht * 4;
+    u8* rgba = (u8*)malloc(rgba_size);
+    if (!rgba) return;
+
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(read_left, gl_y, read_wd, read_ht, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+
+#ifdef PC_ENHANCEMENTS
+    /* Store as full-res GL texture; GXLoadTexObj will substitute it for the RGB565 buffer */
+    {
+        /* Flip: glReadPixels is bottom-up, textures are top-down */
+        int row_bytes = read_wd * 4;
+        for (int y = 0; y < read_ht / 2; y++) {
+            u8* top_row = &rgba[y * row_bytes];
+            u8* bot_row = &rgba[(read_ht - 1 - y) * row_bytes];
+            for (int b = 0; b < row_bytes; b++) {
+                u8 tmp = top_row[b];
+                top_row[b] = bot_row[b];
+                bot_row[b] = tmp;
+            }
+        }
+
+        GLuint efb_tex;
+        glGenTextures(1, &efb_tex);
+        glBindTexture(GL_TEXTURE_2D, efb_tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, read_wd, read_ht, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        pc_gx_efb_capture_store((uintptr_t)dest, efb_tex);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+#else
+    {
+        u8* out = (u8*)dest;
+
+        switch (fmt) {
+            case GX_TF_RGB565:
+            case GX_TF_RGB5A3:
+            case GX_TF_IA8:
+            case GX_CTF_RA8:
+            case GX_CTF_RG8:
+            case GX_CTF_GB8:
+            case GX_TF_Z16:
+            case GX_CTF_Z16L: {
+                int bw = (out_wd + 3) / 4;
+                int bh = (out_ht + 3) / 4;
+                for (int by = 0; by < bh; by++) {
+                    for (int bx = 0; bx < bw; bx++) {
+                        for (int y = 0; y < 4; y++) {
+                            for (int x = 0; x < 4; x++) {
+                                int px = bx * 4 + x;
+                                int py = by * 4 + y;
+                                u8 b0 = 0, b1 = 0;
+
+                                if (px < out_wd && py < out_ht) {
+                                    int src_x = px * read_wd / out_wd;
+                                    int src_y = read_ht - 1 - (py * read_ht / out_ht);
+                                    const u8* p = &rgba[(src_y * read_wd + src_x) * 4];
+
+                                    if (fmt == GX_TF_RGB565) {
+                                        u16 v = pc_gx_pack_rgb565(p);
+                                        b0 = (u8)((v >> 8) & 0xFF);
+                                        b1 = (u8)(v & 0xFF);
+                                    } else if (fmt == GX_TF_RGB5A3) {
+                                        u16 v = pc_gx_pack_rgb5a3(p);
+                                        b0 = (u8)((v >> 8) & 0xFF);
+                                        b1 = (u8)(v & 0xFF);
+                                    } else if (fmt == GX_TF_IA8) {
+                                        b0 = p[3];
+                                        b1 = pc_gx_luma_u8(p);
+                                    } else if (fmt == GX_CTF_RA8) {
+                                        b0 = p[3];
+                                        b1 = p[0];
+                                    } else if (fmt == GX_CTF_RG8) {
+                                        b0 = p[1];
+                                        b1 = p[0];
+                                    } else if (fmt == GX_CTF_GB8) {
+                                        b0 = p[2];
+                                        b1 = p[1];
+                                    } else {
+                                        u16 z = (u16)(pc_gx_luma_u8(p) * 257u);
+                                        b0 = (u8)((z >> 8) & 0xFF);
+                                        b1 = (u8)(z & 0xFF);
+                                    }
+                                }
+                                out[0] = b0;
+                                out[1] = b1;
+                                out += 2;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            case GX_TF_RGBA8:
+            case GX_TF_Z24X8: {
+                int bw = (out_wd + 3) / 4;
+                int bh = (out_ht + 3) / 4;
+                for (int by = 0; by < bh; by++) {
+                    for (int bx = 0; bx < bw; bx++) {
+                        u8 ar[16][2];
+                        u8 gb[16][2];
+                        memset(ar, 0, sizeof(ar));
+                        memset(gb, 0, sizeof(gb));
+
+                        for (int i = 0; i < 16; i++) {
+                            int x = i & 3;
+                            int y = i >> 2;
+                            int px = bx * 4 + x;
+                            int py = by * 4 + y;
+                            if (px < out_wd && py < out_ht) {
+                                int src_x = px * read_wd / out_wd;
+                                int src_y = read_ht - 1 - (py * read_ht / out_ht);
+                                const u8* p = &rgba[(src_y * read_wd + src_x) * 4];
+                                ar[i][0] = p[3];
+                                ar[i][1] = p[0];
+                                gb[i][0] = p[1];
+                                gb[i][1] = p[2];
+                            }
+                        }
+                        for (int i = 0; i < 16; i++) {
+                            out[0] = ar[i][0];
+                            out[1] = ar[i][1];
+                            out += 2;
+                        }
+                        for (int i = 0; i < 16; i++) {
+                            out[0] = gb[i][0];
+                            out[1] = gb[i][1];
+                            out += 2;
+                        }
+                    }
+                }
+                break;
+            }
+            case GX_TF_I8:
+            case GX_CTF_A8:
+            case GX_CTF_R8:
+            case GX_CTF_G8:
+            case GX_CTF_B8:
+            case GX_TF_Z8:
+            case GX_CTF_Z8M:
+            case GX_CTF_Z8L: {
+                int bw = (out_wd + 7) / 8;
+                int bh = (out_ht + 3) / 4;
+                for (int by = 0; by < bh; by++) {
+                    for (int bx = 0; bx < bw; bx++) {
+                        for (int y = 0; y < 4; y++) {
+                            for (int x = 0; x < 8; x++) {
+                                int px = bx * 8 + x;
+                                int py = by * 4 + y;
+                                u8 v = 0;
+                                if (px < out_wd && py < out_ht) {
+                                    int src_x = px * read_wd / out_wd;
+                                    int src_y = read_ht - 1 - (py * read_ht / out_ht);
+                                    const u8* p = &rgba[(src_y * read_wd + src_x) * 4];
+                                    if (fmt == GX_TF_A8 || fmt == GX_CTF_A8) v = p[3];
+                                    else if (fmt == GX_CTF_R8) v = p[0];
+                                    else if (fmt == GX_CTF_G8) v = p[1];
+                                    else if (fmt == GX_CTF_B8) v = p[2];
+                                    else v = pc_gx_luma_u8(p);
+                                }
+                                *out++ = v;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            case GX_TF_IA4:
+            case GX_CTF_RA4: {
+                int bw = (out_wd + 7) / 8;
+                int bh = (out_ht + 3) / 4;
+                for (int by = 0; by < bh; by++) {
+                    for (int bx = 0; bx < bw; bx++) {
+                        for (int y = 0; y < 4; y++) {
+                            for (int x = 0; x < 8; x++) {
+                                int px = bx * 8 + x;
+                                int py = by * 4 + y;
+                                u8 packed = 0;
+                                if (px < out_wd && py < out_ht) {
+                                    int src_x = px * read_wd / out_wd;
+                                    int src_y = read_ht - 1 - (py * read_ht / out_ht);
+                                    const u8* p = &rgba[(src_y * read_wd + src_x) * 4];
+                                    u8 a4 = pc_gx_q4(p[3]);
+                                    u8 i4 = (fmt == GX_CTF_RA4) ? pc_gx_q4(p[0]) : pc_gx_q4(pc_gx_luma_u8(p));
+                                    packed = (u8)((a4 << 4) | i4);
+                                }
+                                *out++ = packed;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            case GX_TF_I4:
+            case GX_CTF_R4:
+            case GX_CTF_Z4: {
+                int bw = (out_wd + 7) / 8;
+                int bh = (out_ht + 7) / 8;
+                for (int by = 0; by < bh; by++) {
+                    for (int bx = 0; bx < bw; bx++) {
+                        for (int y = 0; y < 8; y++) {
+                            for (int x = 0; x < 8; x += 2) {
+                                int px0 = bx * 8 + x;
+                                int px1 = px0 + 1;
+                                int py = by * 8 + y;
+                                u8 hi = 0, lo = 0;
+                                if (px0 < out_wd && py < out_ht) {
+                                    int sx0 = px0 * read_wd / out_wd;
+                                    int sy0 = read_ht - 1 - (py * read_ht / out_ht);
+                                    const u8* p0 = &rgba[(sy0 * read_wd + sx0) * 4];
+                                    hi = (fmt == GX_CTF_R4) ? pc_gx_q4(p0[0]) : pc_gx_q4(pc_gx_luma_u8(p0));
+                                }
+                                if (px1 < out_wd && py < out_ht) {
+                                    int sx1 = px1 * read_wd / out_wd;
+                                    int sy1 = read_ht - 1 - (py * read_ht / out_ht);
+                                    const u8* p1 = &rgba[(sy1 * read_wd + sx1) * 4];
+                                    lo = (fmt == GX_CTF_R4) ? pc_gx_q4(p1[0]) : pc_gx_q4(pc_gx_luma_u8(p1));
+                                }
+                                *out++ = (u8)((hi << 4) | lo);
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            default: {
+                size_t bytes = GXGetTexBufferSize((u16)out_wd, (u16)out_ht, fmt, (GXBool)(g_gx.tex_copy_mipmap ? 1 : 0), 0);
+                if (bytes > 0) {
+                    memset(dest, 0, bytes);
+                }
+                break;
+            }
+        }
+    }
+#endif
+
+    free(rgba);
+    if (clear) {
+        /* Keep color clear behavior while avoiding depth perturbation during texture copy. */
+        pc_gx_clear_copy_rect(g_gx.tex_copy_src, GX_FALSE);
+    }
+}
+
+void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+    if (g_pc_gx_dl.active) {
+        u32 pkt[5] = { PCGX_DL_OP_TEXCOPY_SRC, left, top, wd, ht };
+        pc_gx_dl_write(pkt, sizeof(pkt));
+        return;
+    }
+    g_gx.tex_copy_src[0] = left;
+    g_gx.tex_copy_src[1] = top;
+    g_gx.tex_copy_src[2] = wd;
+    g_gx.tex_copy_src[3] = ht;
+}
+void GXSetTexCopyDst(u16 wd, u16 ht, u32 fmt, GXBool mipmap) {
+    if (g_pc_gx_dl.active) {
+        u32 pkt[5] = { PCGX_DL_OP_TEXCOPY_DST, wd, ht, fmt, mipmap ? 1u : 0u };
+        pc_gx_dl_write(pkt, sizeof(pkt));
+        return;
+    }
+    g_gx.tex_copy_dst[0] = wd;
+    g_gx.tex_copy_dst[1] = ht;
+    g_gx.tex_copy_fmt = fmt;
+    g_gx.tex_copy_mipmap = mipmap ? 1 : 0;
+}
+void GXCopyTex(void* dest, GXBool clear) {
+    if (g_pc_gx_dl.active) {
+        u32 op = PCGX_DL_OP_COPY_TEX;
+        u64 dest64 = (u64)(uintptr_t)dest;
+        u32 clear_u32 = clear ? 1u : 0u;
+        pc_gx_dl_write(&op, sizeof(op));
+        pc_gx_dl_write(&dest64, sizeof(dest64));
+        pc_gx_dl_write(&clear_u32, sizeof(clear_u32));
+        return;
+    }
+
+    pc_gx_copy_tex_execute(dest, clear);
+}
+void GXSetCopyClamp(u32 clamp) { g_gx.copy_clamp = (int)clamp; }
+
+/* --- FIFO --- */
+struct __GXFifoObj {
+    u8 pad[128];
+    void* base;
+    u32 size;
+    void* rp;
+    void* wp;
+    u32 hi;
+    u32 lo;
+};
+
+static GXFifoObj s_cpu_fifo;
+static GXFifoObj s_gp_fifo;
+static GXFifoObj* s_cpu_fifo_ptr = &s_cpu_fifo;
+static GXFifoObj* s_gp_fifo_ptr = &s_gp_fifo;
+
+/* --- GX Init / Management --- */
+GXFifoObj* GXInit(void* base, u32 size) {
+    pc_gx_init();
+
+    memset(&s_cpu_fifo, 0, sizeof(s_cpu_fifo));
+    memset(&s_gp_fifo, 0, sizeof(s_gp_fifo));
+
+    s_cpu_fifo.base = base;
+    s_cpu_fifo.size = size;
+    s_cpu_fifo.rp = base;
+    s_cpu_fifo.wp = base;
+    s_cpu_fifo.hi = size;
+    s_cpu_fifo.lo = size / 2;
+    s_gp_fifo = s_cpu_fifo;
+
+    s_cpu_fifo_ptr = &s_cpu_fifo;
+    s_gp_fifo_ptr = &s_gp_fifo;
+    g_draw_done_cb = NULL;
+
+    /* Match documented SDK GXInit defaults for core lighting/culling state. */
+    {
+        const GXColor black = { 0x00, 0x00, 0x00, 0x00 };
+        const GXColor white = { 0xFF, 0xFF, 0xFF, 0xFF };
+        GXSetCullMode(GX_CULL_BACK);
+        GXSetNumChans(0);
+        GXSetChanCtrl(
+            GX_COLOR0A0,
+            GX_DISABLE,
+            GX_SRC_REG,
+            GX_SRC_VTX,
+            GX_LIGHT_NULL,
+            GX_DF_NONE,
+            GX_AF_NONE
+        );
+        GXSetChanAmbColor(GX_COLOR0A0, black);
+        GXSetChanMatColor(GX_COLOR0A0, white);
+        GXSetChanCtrl(
+            GX_COLOR1A1,
+            GX_DISABLE,
+            GX_SRC_REG,
+            GX_SRC_VTX,
+            GX_LIGHT_NULL,
+            GX_DF_NONE,
+            GX_AF_NONE
+        );
+        GXSetChanAmbColor(GX_COLOR1A1, black);
+        GXSetChanMatColor(GX_COLOR1A1, white);
+    }
+
+    return s_cpu_fifo_ptr;
+}
+
+void GXSetMisc(u32 token, u32 val) { (void)token; (void)val; }
+void GXFlush(void) { pc_gx_commit_pending_and_flush(); glFlush(); }
+void GXResetWriteGatherPipe(void) {}
+void GXAbortFrame(void) {
+    g_gx.in_begin = 0;
+    g_gx.vertex_pending = 0;
+    g_gx.current_vertex_idx = 0;
+}
+void GXSetDrawSync(u16 token) { (void)token; }
+u16  GXReadDrawSync(void) { return 0; }
+void GXSetDrawDone(void) {
+    pc_gx_commit_pending_and_flush();
+    glFlush();
+    if (g_draw_done_cb) g_draw_done_cb();
+}
+void GXWaitDrawDone(void) {
+    pc_gx_commit_pending_and_flush();
+    glFinish();
+    if (g_draw_done_cb) g_draw_done_cb();
+}
+void GXDrawDone(void) {
+    pc_gx_commit_pending_and_flush();
+    glFinish();
+    if (g_draw_done_cb) g_draw_done_cb();
+}
+
+void pc_gx_prepare_for_present(void) {
+    if (!g_pc_gx_initialized) return;
+    glUseProgram(0);
+    g_gx.current_shader = 0;
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
+void GXPixModeSync(void) {}
+void GXTexModeSync(void) {}
+
+void* GXSetDrawSyncCallback(void* cb) { (void)cb; return NULL; }
+typedef void (*GXDrawDoneCallback)(void);
+GXDrawDoneCallback GXSetDrawDoneCallback(GXDrawDoneCallback cb) {
+    GXDrawDoneCallback prev = g_draw_done_cb;
+    g_draw_done_cb = cb;
+    return prev;
+}
+
+void GXInitFifoBase(GXFifoObj* fifo, void* base, u32 size) {
+    if (!fifo) return;
+    fifo->base = base;
+    fifo->size = size;
+}
+void GXInitFifoPtrs(GXFifoObj* fifo, void* rp, void* wp) {
+    if (!fifo) return;
+    fifo->rp = rp;
+    fifo->wp = wp;
+}
+void GXInitFifoLimits(GXFifoObj* fifo, u32 hi, u32 lo) {
+    if (!fifo) return;
+    fifo->hi = hi;
+    fifo->lo = lo;
+}
+void GXSetCPUFifo(GXFifoObj* fifo) {
+    if (fifo) s_cpu_fifo_ptr = fifo;
+}
+void GXSetGPFifo(GXFifoObj* fifo) {
+    if (fifo) s_gp_fifo_ptr = fifo;
+}
+void GXSaveCPUFifo(GXFifoObj* fifo) {
+    if (fifo && s_cpu_fifo_ptr) *fifo = *s_cpu_fifo_ptr;
+}
+void GXSaveGPFifo(GXFifoObj* fifo) {
+    if (fifo && s_gp_fifo_ptr) *fifo = *s_gp_fifo_ptr;
+}
+void GXGetGPStatus(GXBool* a, GXBool* b, GXBool* c, GXBool* d, GXBool* e) {
+    if (a) *a = 0;
+    if (b) *b = 0;
+    if (c) *c = 1;
+    if (d) *d = 1;
+    if (e) *e = 0;
+}
+void GXGetFifoStatus(GXFifoObj* f, GXBool* a, GXBool* b, u32* c, GXBool* d, GXBool* e, GXBool* g) {
+    GXFifoObj* fifo = f ? f : s_cpu_fifo_ptr;
+    if (a) *a = 0;
+    if (b) *b = 0;
+    if (c) *c = fifo ? fifo->size : 0;
+    if (d) *d = 0;
+    if (e) *e = 0;
+    if (g) *g = 0;
+}
+void GXGetFifoPtrs(GXFifoObj* f, void** rp, void** wp) {
+    GXFifoObj* fifo = f ? f : s_cpu_fifo_ptr;
+    if (rp) *rp = fifo ? fifo->rp : NULL;
+    if (wp) *wp = fifo ? fifo->wp : NULL;
+}
+void* GXGetFifoBase(GXFifoObj* f) {
+    GXFifoObj* fifo = f ? f : s_cpu_fifo_ptr;
+    return fifo ? fifo->base : NULL;
+}
+u32 GXGetFifoSize(GXFifoObj* f) {
+    GXFifoObj* fifo = f ? f : s_cpu_fifo_ptr;
+    return fifo ? fifo->size : 0;
+}
+void GXGetFifoLimits(GXFifoObj* f, u32* hi, u32* lo) {
+    GXFifoObj* fifo = f ? f : s_cpu_fifo_ptr;
+    if (hi) *hi = fifo ? fifo->hi : 0;
+    if (lo) *lo = fifo ? fifo->lo : 0;
+}
+void* GXSetBreakPtCallback(void* cb) { return NULL; }
+void GXEnableBreakPt(void* bp) { (void)bp; }
+void GXDisableBreakPt(void) {}
+void* GXSetCurrentGXThread(void) { return NULL; }
+void* GXGetCurrentGXThread(void) { return NULL; }
+GXFifoObj* GXGetCPUFifo(void) { return s_cpu_fifo_ptr; }
+GXFifoObj* GXGetGPFifo(void) { return s_gp_fifo_ptr; }
+u32 GXGetOverflowCount(void) { return 0; }
+u32 GXResetOverflowCount(void) { return 0; }
+volatile void* GXRedirectWriteGatherPipe(void* ptr) { return ptr; }
+void GXRestoreWriteGatherPipe(void) {}
+int IsWriteGatherBufferEmpty(void) { return 1; }
+
+/* --- Display List --- */
+void GXBeginDisplayList(void* list, u32 size) {
+    pc_gx_commit_pending_and_flush();
+    if (g_pc_gx_dl.active) return;
+    g_pc_gx_dl.active = 1;
+    g_pc_gx_dl.buf = (u8*)list;
+    g_pc_gx_dl.size = size;
+    g_pc_gx_dl.off = 0;
+    g_pc_gx_dl.overflow = 0;
+}
+u32 GXEndDisplayList(void) {
+    u32 nbytes = 0;
+    if (g_pc_gx_dl.active && !g_pc_gx_dl.overflow) {
+        nbytes = g_pc_gx_dl.off;
+        if (g_pc_gx_dl.buf && g_pc_gx_dl.size > 0) {
+            while ((nbytes & 31u) != 0u && nbytes < g_pc_gx_dl.size) {
+                g_pc_gx_dl.buf[nbytes++] = GX_NOP;
+            }
+        }
+    }
+    g_pc_gx_dl.active = 0;
+    g_pc_gx_dl.buf = NULL;
+    g_pc_gx_dl.size = 0;
+    g_pc_gx_dl.off = 0;
+    g_pc_gx_dl.overflow = 0;
+    return nbytes;
+}
+
+typedef struct {
+    int vtx_desc[PC_GX_MAX_ATTR];
+    PCGXVertexFormat vtx_fmt[PC_GX_MAX_VTXFMT];
+    const void* array_base[PC_GX_MAX_ATTR];
+    u8 array_stride[PC_GX_MAX_ATTR];
+    u32 matindex_a;
+    u32 matindex_b;
+} PCGXDLDecodeState;
+
+static u16 pc_gx_dl_read_be16(const u8* p) {
+    return pc_gx_be16(p);
+}
+
+static u32 pc_gx_dl_read_be32(const u8* p) {
+    return pc_gx_be32(p);
+}
+
+static void pc_gx_dl_state_init(PCGXDLDecodeState* st) {
+    if (!st) return;
+    memcpy(st->vtx_desc, g_gx.vtx_desc, sizeof(st->vtx_desc));
+    memcpy(st->vtx_fmt, g_gx.vtx_fmt, sizeof(st->vtx_fmt));
+    memcpy((void*)st->array_base, g_gx.array_base, sizeof(st->array_base));
+    memcpy(st->array_stride, g_gx.array_stride, sizeof(st->array_stride));
+    st->matindex_a = (u32)(g_gx.current_mtx * 3u);
+    st->matindex_b = 0;
+}
+
+static int pc_gx_dl_read_comp_f32(const u8* ptr, u32 remaining, u8 type, u8 frac, float* out_value, u32* out_consumed) {
+    float scale = 1.0f;
+    if (!ptr || !out_value || !out_consumed) return 0;
+
+    switch (type) {
+        case GX_U8:
+            if (remaining < 1) return 0;
+            if (frac) scale = 1.0f / (float)(1u << frac);
+            *out_value = (float)ptr[0] * scale;
+            *out_consumed = 1;
+            return 1;
+        case GX_S8:
+            if (remaining < 1) return 0;
+            if (frac) scale = 1.0f / (float)(1u << frac);
+            *out_value = (float)(s8)ptr[0] * scale;
+            *out_consumed = 1;
+            return 1;
+        case GX_U16:
+            if (remaining < 2) return 0;
+            if (frac) scale = 1.0f / (float)(1u << frac);
+            *out_value = (float)pc_gx_dl_read_be16(ptr) * scale;
+            *out_consumed = 2;
+            return 1;
+        case GX_S16:
+            if (remaining < 2) return 0;
+            if (frac) scale = 1.0f / (float)(1u << frac);
+            *out_value = (float)(s16)pc_gx_dl_read_be16(ptr) * scale;
+            *out_consumed = 2;
+            return 1;
+        case GX_F32: {
+            union {
+                u32 u;
+                float f;
+            } cvt;
+            if (remaining < 4) return 0;
+            cvt.u = pc_gx_dl_read_be32(ptr);
+            *out_value = cvt.f;
+            *out_consumed = 4;
+            return 1;
+        }
+        default:
+            break;
+    }
+    return 0;
+}
+
+static int pc_gx_dl_read_color_direct(const u8* ptr, u32 remaining, u8 cnt, u8 type, u8 out_rgba[4], u32* out_consumed) {
+    if (!ptr || !out_rgba || !out_consumed) return 0;
+
+    out_rgba[0] = 255;
+    out_rgba[1] = 255;
+    out_rgba[2] = 255;
+    out_rgba[3] = 255;
+
+    switch (type) {
+        case GX_RGB565: {
+            u16 c;
+            if (remaining < 2) return 0;
+            c = pc_gx_dl_read_be16(ptr);
+            out_rgba[0] = (u8)(((c >> 11) & 0x1F) * 255 / 31);
+            out_rgba[1] = (u8)(((c >> 5) & 0x3F) * 255 / 63);
+            out_rgba[2] = (u8)((c & 0x1F) * 255 / 31);
+            out_rgba[3] = 255;
+            *out_consumed = 2;
+            return 1;
+        }
+        case GX_RGB8: {
+            if (remaining < 3) return 0;
+            out_rgba[0] = ptr[0];
+            out_rgba[1] = ptr[1];
+            out_rgba[2] = ptr[2];
+            out_rgba[3] = 255;
+            *out_consumed = 3;
+            return 1;
+        }
+        case GX_RGBX8: {
+            if (remaining < 4) return 0;
+            out_rgba[0] = ptr[0];
+            out_rgba[1] = ptr[1];
+            out_rgba[2] = ptr[2];
+            out_rgba[3] = 255;
+            *out_consumed = 4;
+            return 1;
+        }
+        case GX_RGBA4: {
+            u16 c;
+            if (remaining < 2) return 0;
+            c = pc_gx_dl_read_be16(ptr);
+            out_rgba[0] = (u8)((((c >> 12) & 0x0F) * 255) / 15);
+            out_rgba[1] = (u8)((((c >> 8) & 0x0F) * 255) / 15);
+            out_rgba[2] = (u8)((((c >> 4) & 0x0F) * 255) / 15);
+            out_rgba[3] = (u8)(((c & 0x0F) * 255) / 15);
+            *out_consumed = 2;
+            return 1;
+        }
+        case GX_RGBA6: {
+            u32 c;
+            if (remaining < 3) return 0;
+            c = ((u32)ptr[0] << 16) | ((u32)ptr[1] << 8) | (u32)ptr[2];
+            out_rgba[0] = (u8)((((c >> 18) & 0x3F) * 255) / 63);
+            out_rgba[1] = (u8)((((c >> 12) & 0x3F) * 255) / 63);
+            out_rgba[2] = (u8)((((c >> 6) & 0x3F) * 255) / 63);
+            out_rgba[3] = (u8)(((c & 0x3F) * 255) / 63);
+            *out_consumed = 3;
+            return 1;
+        }
+        case GX_RGBA8:
+        default: {
+            if (remaining < 4) return 0;
+            out_rgba[0] = ptr[0];
+            out_rgba[1] = ptr[1];
+            out_rgba[2] = ptr[2];
+            out_rgba[3] = ptr[3];
+            *out_consumed = 4;
+            if (cnt == GX_CLR_RGB) {
+                out_rgba[3] = 255;
+            }
+            return 1;
+        }
+    }
+}
+
+static int pc_gx_dl_emit_indexed_attr(PCGXDLDecodeState* st, u8 vtxfmt, u32 attr, u32 index) {
+    const PCGXVertexFormat* fmt;
+    const u8* base;
+    const u8* src;
+    u8 cnt;
+    u8 type;
+    u8 frac;
+
+    if (!st || vtxfmt >= GX_MAX_VTXFMT) return 0;
+    if (attr >= PC_GX_MAX_ATTR) return 0;
+
+    if (attr <= GX_VA_TEX7MTXIDX) {
+        if (attr == GX_VA_PNMTXIDX) {
+            GXSetCurrentMtx(index & 0x3Fu);
+        }
+        return 1;
+    }
+
+    fmt = &st->vtx_fmt[vtxfmt];
+    base = (const u8*)st->array_base[attr];
+    if (!base) return 1;
+    src = base + index * st->array_stride[attr];
+
+    switch (attr) {
+        case GX_VA_POS: {
+            float x;
+            float y;
+            float z;
+            cnt = fmt->attr_cnt[GX_VA_POS];
+            type = fmt->attr_type[GX_VA_POS];
+            frac = fmt->attr_frac[GX_VA_POS];
+            if (cnt != GX_POS_XY && cnt != GX_POS_XYZ) cnt = GX_POS_XYZ;
+            pc_gx_read_position_indexed(src, cnt, type, frac, &x, &y, &z);
+            GXPosition3f32(x, y, z);
+            return 1;
+        }
+        case GX_VA_NRM: {
+            float x;
+            float y;
+            float z;
+            type = fmt->attr_type[GX_VA_NRM];
+            frac = fmt->attr_frac[GX_VA_NRM];
+            pc_gx_read_normal_indexed(src, type, frac, &x, &y, &z);
+            GXNormal3f32(x, y, z);
+            return 1;
+        }
+        case GX_VA_CLR0:
+        case GX_VA_CLR1: {
+            u8 rgba[4];
+            cnt = fmt->attr_cnt[attr];
+            type = fmt->attr_type[attr];
+            if (cnt != GX_CLR_RGB && cnt != GX_CLR_RGBA) cnt = GX_CLR_RGBA;
+            pc_gx_read_color_indexed(src, cnt, type, rgba);
+            GXColor4u8(rgba[0], rgba[1], rgba[2], rgba[3]);
+            return 1;
+        }
+        case GX_VA_TEX0:
+        case GX_VA_TEX1:
+        case GX_VA_TEX2:
+        case GX_VA_TEX3:
+        case GX_VA_TEX4:
+        case GX_VA_TEX5:
+        case GX_VA_TEX6:
+        case GX_VA_TEX7: {
+            float s;
+            float t;
+            cnt = fmt->attr_cnt[attr];
+            type = fmt->attr_type[attr];
+            frac = fmt->attr_frac[attr];
+            if (cnt != GX_TEX_S && cnt != GX_TEX_ST) cnt = GX_TEX_ST;
+            pc_gx_read_texcoord_indexed(src, cnt, type, frac, &s, &t);
+            pc_gx_set_texcoord_channel(attr - GX_VA_TEX0, s, t);
+            return 1;
+        }
+        default:
+            return 1;
+    }
+}
+
+static int pc_gx_dl_emit_direct_attr(PCGXDLDecodeState* st, u8 vtxfmt, u32 attr, const u8* ptr, u32 remaining, u32* out_consumed) {
+    const PCGXVertexFormat* fmt;
+    u32 used = 0;
+    u32 consumed = 0;
+    float comps[9];
+    u8 rgba[4];
+    int comp_count = 0;
+    int i;
+    u8 cnt;
+    u8 type;
+    u8 frac;
+
+    if (!st || !ptr || !out_consumed || vtxfmt >= GX_MAX_VTXFMT) return 0;
+    if (attr >= PC_GX_MAX_ATTR) return 0;
+    *out_consumed = 0;
+    fmt = &st->vtx_fmt[vtxfmt];
+
+    if (attr <= GX_VA_TEX7MTXIDX) {
+        if (remaining < 1) return 0;
+        if (attr == GX_VA_PNMTXIDX) {
+            GXSetCurrentMtx((u32)(ptr[0] & 0x3Fu));
+        }
+        *out_consumed = 1;
+        return 1;
+    }
+
+    switch (attr) {
+        case GX_VA_POS:
+            cnt = fmt->attr_cnt[GX_VA_POS];
+            type = fmt->attr_type[GX_VA_POS];
+            frac = fmt->attr_frac[GX_VA_POS];
+            comp_count = (cnt == GX_POS_XY) ? 2 : 3;
+            for (i = 0; i < comp_count; ++i) {
+                if (!pc_gx_dl_read_comp_f32(ptr + used, remaining - used, type, frac, &comps[i], &consumed)) return 0;
+                used += consumed;
+            }
+            if (comp_count == 2) comps[2] = 0.0f;
+            GXPosition3f32(comps[0], comps[1], comps[2]);
+            *out_consumed = used;
+            return 1;
+        case GX_VA_NRM:
+            cnt = fmt->attr_cnt[GX_VA_NRM];
+            type = fmt->attr_type[GX_VA_NRM];
+            frac = fmt->attr_frac[GX_VA_NRM];
+            comp_count = (cnt == GX_NRM_XYZ) ? 3 : 9;
+            for (i = 0; i < comp_count; ++i) {
+                float tmp;
+                if (!pc_gx_dl_read_comp_f32(ptr + used, remaining - used, type, frac, &tmp, &consumed)) return 0;
+                if (i < 3) comps[i] = tmp;
+                used += consumed;
+            }
+            GXNormal3f32(comps[0], comps[1], comps[2]);
+            *out_consumed = used;
+            return 1;
+        case GX_VA_CLR0:
+        case GX_VA_CLR1:
+            cnt = fmt->attr_cnt[attr];
+            type = fmt->attr_type[attr];
+            if (!pc_gx_dl_read_color_direct(ptr, remaining, cnt, type, rgba, &consumed)) return 0;
+            GXColor4u8(rgba[0], rgba[1], rgba[2], rgba[3]);
+            *out_consumed = consumed;
+            return 1;
+        case GX_VA_TEX0:
+        case GX_VA_TEX1:
+        case GX_VA_TEX2:
+        case GX_VA_TEX3:
+        case GX_VA_TEX4:
+        case GX_VA_TEX5:
+        case GX_VA_TEX6:
+        case GX_VA_TEX7:
+            cnt = fmt->attr_cnt[attr];
+            type = fmt->attr_type[attr];
+            frac = fmt->attr_frac[attr];
+            comp_count = (cnt == GX_TEX_S) ? 1 : 2;
+            if (!pc_gx_dl_read_comp_f32(ptr + used, remaining - used, type, frac, &comps[0], &consumed)) return 0;
+            used += consumed;
+            if (comp_count == 2) {
+                if (!pc_gx_dl_read_comp_f32(ptr + used, remaining - used, type, frac, &comps[1], &consumed)) return 0;
+                used += consumed;
+            } else {
+                comps[1] = 0.0f;
+            }
+            pc_gx_set_texcoord_channel(attr - GX_VA_TEX0, comps[0], comps[1]);
+            *out_consumed = used;
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static void pc_gx_dl_apply_vcd_lo(PCGXDLDecodeState* st, u32 data) {
+    if (!st) return;
+    st->vtx_desc[GX_VA_PNMTXIDX] = (data & 0x1u) ? GX_DIRECT : GX_NONE;
+    st->vtx_desc[GX_VA_TEX0MTXIDX] = (data & 0x2u) ? GX_DIRECT : GX_NONE;
+    st->vtx_desc[GX_VA_TEX1MTXIDX] = (data & 0x4u) ? GX_DIRECT : GX_NONE;
+    st->vtx_desc[GX_VA_TEX2MTXIDX] = (data & 0x8u) ? GX_DIRECT : GX_NONE;
+    st->vtx_desc[GX_VA_TEX3MTXIDX] = (data & 0x10u) ? GX_DIRECT : GX_NONE;
+    st->vtx_desc[GX_VA_TEX4MTXIDX] = (data & 0x20u) ? GX_DIRECT : GX_NONE;
+    st->vtx_desc[GX_VA_TEX5MTXIDX] = (data & 0x40u) ? GX_DIRECT : GX_NONE;
+    st->vtx_desc[GX_VA_TEX6MTXIDX] = (data & 0x80u) ? GX_DIRECT : GX_NONE;
+    st->vtx_desc[GX_VA_TEX7MTXIDX] = (data & 0x100u) ? GX_DIRECT : GX_NONE;
+    st->vtx_desc[GX_VA_POS] = (int)((data >> 9) & 0x3u);
+    st->vtx_desc[GX_VA_NRM] = (int)((data >> 11) & 0x3u);
+    st->vtx_desc[GX_VA_CLR0] = (int)((data >> 13) & 0x3u);
+    st->vtx_desc[GX_VA_CLR1] = (int)((data >> 15) & 0x3u);
+}
+
+static void pc_gx_dl_apply_vcd_hi(PCGXDLDecodeState* st, u32 data) {
+    int i;
+    if (!st) return;
+    for (i = 0; i < 8; ++i) {
+        st->vtx_desc[GX_VA_TEX0 + i] = (int)((data >> (i * 2)) & 0x3u);
+    }
+}
+
+static void pc_gx_dl_apply_vat(PCGXDLDecodeState* st, u8 reg_addr, u8 vat_idx, u32 data) {
+    PCGXVertexFormat* fmt;
+    u8 nrm_cnt;
+    u8 nrm_idx3;
+    if (!st || vat_idx >= GX_MAX_VTXFMT) return;
+    fmt = &st->vtx_fmt[vat_idx];
+
+    switch (reg_addr) {
+        case 0x7:
+            fmt->attr_cnt[GX_VA_POS] = (u8)(data & 0x1u);
+            fmt->attr_type[GX_VA_POS] = (u8)((data >> 1) & 0x7u);
+            fmt->attr_frac[GX_VA_POS] = (u8)((data >> 4) & 0x1Fu);
+
+            nrm_cnt = (u8)((data >> 9) & 0x1u);
+            nrm_idx3 = (u8)((data >> 31) & 0x1u);
+            fmt->attr_cnt[GX_VA_NRM] = nrm_cnt ? (nrm_idx3 ? GX_NRM_NBT3 : GX_NRM_NBT) : GX_NRM_XYZ;
+            fmt->attr_type[GX_VA_NRM] = (u8)((data >> 10) & 0x7u);
+            fmt->attr_frac[GX_VA_NRM] = 0;
+
+            fmt->attr_cnt[GX_VA_CLR0] = (u8)((data >> 13) & 0x1u);
+            fmt->attr_type[GX_VA_CLR0] = (u8)((data >> 14) & 0x7u);
+            fmt->attr_frac[GX_VA_CLR0] = 0;
+
+            fmt->attr_cnt[GX_VA_CLR1] = (u8)((data >> 17) & 0x1u);
+            fmt->attr_type[GX_VA_CLR1] = (u8)((data >> 18) & 0x7u);
+            fmt->attr_frac[GX_VA_CLR1] = 0;
+
+            fmt->attr_cnt[GX_VA_TEX0] = (u8)((data >> 21) & 0x1u);
+            fmt->attr_type[GX_VA_TEX0] = (u8)((data >> 22) & 0x7u);
+            fmt->attr_frac[GX_VA_TEX0] = (u8)((data >> 25) & 0x1Fu);
+            break;
+        case 0x8:
+            fmt->attr_cnt[GX_VA_TEX1] = (u8)((data >> 0) & 0x1u);
+            fmt->attr_type[GX_VA_TEX1] = (u8)((data >> 1) & 0x7u);
+            fmt->attr_frac[GX_VA_TEX1] = (u8)((data >> 4) & 0x1Fu);
+
+            fmt->attr_cnt[GX_VA_TEX2] = (u8)((data >> 9) & 0x1u);
+            fmt->attr_type[GX_VA_TEX2] = (u8)((data >> 10) & 0x7u);
+            fmt->attr_frac[GX_VA_TEX2] = (u8)((data >> 13) & 0x1Fu);
+
+            fmt->attr_cnt[GX_VA_TEX3] = (u8)((data >> 18) & 0x1u);
+            fmt->attr_type[GX_VA_TEX3] = (u8)((data >> 19) & 0x7u);
+            fmt->attr_frac[GX_VA_TEX3] = (u8)((data >> 22) & 0x1Fu);
+
+            fmt->attr_cnt[GX_VA_TEX4] = (u8)((data >> 27) & 0x1u);
+            fmt->attr_type[GX_VA_TEX4] = (u8)((data >> 28) & 0x7u);
+            break;
+        case 0x9:
+            fmt->attr_frac[GX_VA_TEX4] = (u8)((data >> 0) & 0x1Fu);
+
+            fmt->attr_cnt[GX_VA_TEX5] = (u8)((data >> 5) & 0x1u);
+            fmt->attr_type[GX_VA_TEX5] = (u8)((data >> 6) & 0x7u);
+            fmt->attr_frac[GX_VA_TEX5] = (u8)((data >> 9) & 0x1Fu);
+
+            fmt->attr_cnt[GX_VA_TEX6] = (u8)((data >> 14) & 0x1u);
+            fmt->attr_type[GX_VA_TEX6] = (u8)((data >> 15) & 0x7u);
+            fmt->attr_frac[GX_VA_TEX6] = (u8)((data >> 18) & 0x1Fu);
+
+            fmt->attr_cnt[GX_VA_TEX7] = (u8)((data >> 23) & 0x1u);
+            fmt->attr_type[GX_VA_TEX7] = (u8)((data >> 24) & 0x7u);
+            fmt->attr_frac[GX_VA_TEX7] = (u8)((data >> 27) & 0x1Fu);
+            break;
+        default:
+            break;
+    }
+}
+
+static void pc_gx_dl_apply_cp_stream_reg(PCGXDLDecodeState* st, u8 reg8, u32 data) {
+    u8 reg_idx;
+    u8 reg_addr;
+    if (!st) return;
+
+    reg_idx = (u8)(reg8 & 0x0Fu);
+    reg_addr = (u8)((reg8 >> 4) & 0x0Fu);
+    switch (reg_addr) {
+        case 0x3:
+            st->matindex_a = data;
+            break;
+        case 0x4:
+            st->matindex_b = data;
+            break;
+        case 0x5:
+            pc_gx_dl_apply_vcd_lo(st, data);
+            break;
+        case 0x6:
+            pc_gx_dl_apply_vcd_hi(st, data);
+            break;
+        case 0x7:
+        case 0x8:
+        case 0x9:
+            pc_gx_dl_apply_vat(st, reg_addr, reg_idx, data);
+            break;
+        case 0xA:
+        case 0xB: {
+            u32 cp_attr = reg_idx;
+            if (cp_attr <= (GX_VA_TEX7 - GX_VA_POS)) {
+                u32 attr = GX_VA_POS + cp_attr;
+                if (reg_addr == 0xA) {
+                    st->array_base[attr] = (const void*)(uintptr_t)(u32)data;
+                } else {
+                    st->array_stride[attr] = (u8)(data & 0xFFu);
+                }
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+static u32 pc_gx_dl_execute_draw_command(const u8* ptr, u32 remaining, PCGXDLDecodeState* st) {
+    u8 cmd;
+    u8 prim;
+    u8 vtxfmt;
+    u32 nverts;
+    u32 v;
+    const u8* cur;
+    u32 left;
+    u32 attr;
+
+    if (!ptr || !st || remaining < 3) return 0;
+
+    cmd = ptr[0];
+    prim = (u8)(cmd & GX_OPCODE_MASK);
+    vtxfmt = (u8)(cmd & GX_VAT_MASK);
+    if (vtxfmt >= GX_MAX_VTXFMT) return 0;
+
+    switch (prim) {
+        case GX_DRAW_QUADS:
+        case 0x88: /* GX_DRAW_QUADS_2 behaves the same as GX_DRAW_QUADS */
+        case GX_DRAW_TRIANGLES:
+        case GX_DRAW_TRIANGLE_STRIP:
+        case GX_DRAW_TRIANGLE_FAN:
+        case GX_DRAW_LINES:
+        case GX_DRAW_LINE_STRIP:
+        case GX_DRAW_POINTS:
+            break;
+        default:
+            return 0;
+    }
+
+    nverts = pc_gx_dl_read_be16(ptr + 1);
+    cur = ptr + 3;
+    left = remaining - 3;
+
+    GXBegin((u32)prim, (u32)vtxfmt, (u16)nverts);
+
+    for (v = 0; v < nverts; ++v) {
+        if (st->vtx_desc[GX_VA_PNMTXIDX] == GX_NONE) {
+            GXSetCurrentMtx(st->matindex_a & 0x3Fu);
+        }
+        for (attr = GX_VA_PNMTXIDX; attr <= GX_VA_TEX7; ++attr) {
+            u32 type = (u32)st->vtx_desc[attr];
+            if (type == GX_NONE) continue;
+
+            if (type == GX_INDEX8) {
+                u32 index_bytes = 1;
+                if (left < 1) {
+                    GXEnd();
+                    return 0;
+                }
+                if (attr == GX_VA_NRM && st->vtx_fmt[vtxfmt].attr_cnt[GX_VA_NRM] == GX_NRM_NBT3) {
+                    index_bytes = 3;
+                    if (left < index_bytes) {
+                        GXEnd();
+                        return 0;
+                    }
+                }
+                if (!pc_gx_dl_emit_indexed_attr(st, vtxfmt, attr, (u32)cur[0])) {
+                    GXEnd();
+                    return 0;
+                }
+                cur += index_bytes;
+                left -= index_bytes;
+            } else if (type == GX_INDEX16) {
+                u32 index;
+                u32 index_bytes = 2;
+                if (left < 2) {
+                    GXEnd();
+                    return 0;
+                }
+                if (attr == GX_VA_NRM && st->vtx_fmt[vtxfmt].attr_cnt[GX_VA_NRM] == GX_NRM_NBT3) {
+                    index_bytes = 6;
+                    if (left < index_bytes) {
+                        GXEnd();
+                        return 0;
+                    }
+                }
+                index = (u32)pc_gx_dl_read_be16(cur);
+                if (!pc_gx_dl_emit_indexed_attr(st, vtxfmt, attr, index)) {
+                    GXEnd();
+                    return 0;
+                }
+                cur += index_bytes;
+                left -= index_bytes;
+            } else if (type == GX_DIRECT) {
+                u32 consumed = 0;
+                if (!pc_gx_dl_emit_direct_attr(st, vtxfmt, attr, cur, left, &consumed) || consumed > left) {
+                    GXEnd();
+                    return 0;
+                }
+                cur += consumed;
+                left -= consumed;
+            } else {
+                GXEnd();
+                return 0;
+            }
+        }
+    }
+
+    GXEnd();
+    return (u32)(cur - ptr);
+}
+
+static int pc_gx_dl_try_execute_custom(const u8* p, u32 nbytes) {
+    u32 off = 0;
+
+    while (off + sizeof(u32) <= nbytes) {
+        u32 op = 0;
+
+        /* GXEndDisplayList pads to 32-byte alignment using 0x00 (GX_NOP). */
+        if (p[off] == 0) {
+            u32 i;
+            int all_zero = 1;
+            for (i = off; i < nbytes; ++i) {
+                if (p[i] != 0) {
+                    all_zero = 0;
+                    break;
+                }
+            }
+            if (all_zero) return 1;
+        }
+
+        memcpy(&op, p + off, sizeof(op));
+        off += sizeof(op);
+
+        switch (op) {
+            case PCGX_DL_OP_TEXCOPY_SRC: {
+                u32 v[4];
+                if (off + sizeof(v) > nbytes) return 0;
+                memcpy(v, p + off, sizeof(v));
+                off += sizeof(v);
+                GXSetTexCopySrc((u16)v[0], (u16)v[1], (u16)v[2], (u16)v[3]);
+                break;
+            }
+            case PCGX_DL_OP_TEXCOPY_DST: {
+                u32 v[4];
+                if (off + sizeof(v) > nbytes) return 0;
+                memcpy(v, p + off, sizeof(v));
+                off += sizeof(v);
+                GXSetTexCopyDst((u16)v[0], (u16)v[1], v[2], (GXBool)(v[3] ? 1 : 0));
+                break;
+            }
+            case PCGX_DL_OP_COPY_FILTER:
+                break;
+            case PCGX_DL_OP_COPY_TEX: {
+                u64 dest64 = 0;
+                u32 clear = 0;
+                if (off + sizeof(dest64) + sizeof(clear) > nbytes) return 0;
+                memcpy(&dest64, p + off, sizeof(dest64));
+                off += sizeof(dest64);
+                memcpy(&clear, p + off, sizeof(clear));
+                off += sizeof(clear);
+                pc_gx_copy_tex_execute((void*)(uintptr_t)dest64, (GXBool)(clear ? 1 : 0));
+                break;
+            }
+            case PCGX_DL_OP_DRAW_BATCH: {
+                u32 prim = 0;
+                u32 count = 0;
+                u32 bytes = 0;
+                const PCGXVertex* verts;
+                int old_prim;
+                int old_vtxfmt;
+                int old_expected;
+                int old_in_begin;
+                int old_pending;
+                int old_idx;
+                PCGXVertex old_current;
+
+                if (off + sizeof(prim) + sizeof(count) > nbytes) return 0;
+                memcpy(&prim, p + off, sizeof(prim));
+                off += sizeof(prim);
+                memcpy(&count, p + off, sizeof(count));
+                off += sizeof(count);
+                if (count == 0 || count > PC_GX_MAX_VERTS) return 0;
+
+                bytes = count * (u32)sizeof(PCGXVertex);
+                if (off + bytes > nbytes) return 0;
+                verts = (const PCGXVertex*)(const void*)(p + off);
+                off += bytes;
+
+                old_prim = g_gx.current_primitive;
+                old_vtxfmt = g_gx.current_vtxfmt;
+                old_expected = g_gx.expected_vertex_count;
+                old_in_begin = g_gx.in_begin;
+                old_pending = g_gx.vertex_pending;
+                old_idx = g_gx.current_vertex_idx;
+                old_current = g_gx.current_vertex;
+
+                g_gx.current_primitive = (int)prim;
+                g_gx.current_vertex_idx = (int)count;
+                g_gx.in_begin = 0;
+                g_gx.vertex_pending = 0;
+                memcpy(g_gx.vertex_buffer, verts, bytes);
+                pc_gx_flush_vertices();
+
+                g_gx.current_primitive = old_prim;
+                g_gx.current_vtxfmt = old_vtxfmt;
+                g_gx.expected_vertex_count = old_expected;
+                g_gx.in_begin = old_in_begin;
+                g_gx.vertex_pending = old_pending;
+                g_gx.current_vertex_idx = old_idx;
+                g_gx.current_vertex = old_current;
+                break;
+            }
+            default:
+                return 0;
+        }
+    }
+
+    return off == nbytes;
+}
+
+static void pc_gx_dl_execute_raw_internal(const u8* p, u32 nbytes, PCGXDLDecodeState* st, u32 depth) {
+    u32 off = 0;
+    if (!p || !st || depth > 8) return;
+
+    while (off < nbytes) {
+        u32 remaining = nbytes - off;
+        u8 cmd = p[off];
+        u8 prim = (u8)(cmd & GX_OPCODE_MASK);
+
+        if (prim >= GX_DRAW_QUADS && prim <= GX_DRAW_POINTS) {
+            u32 consumed = pc_gx_dl_execute_draw_command(p + off, remaining, st);
+            if (consumed == 0) break;
+            off += consumed;
+            continue;
+        }
+
+        switch (cmd) {
+            case GX_NOP:
+            case GX_CMD_INVL_VC:
+                off += 1;
+                break;
+            case GX_LOAD_BP_REG:
+                if (remaining < 5) return;
+                off += 5;
+                break;
+            case GX_LOAD_CP_REG: {
+                u8 reg8;
+                u32 data;
+                if (remaining < 6) return;
+                reg8 = p[off + 1];
+                data = pc_gx_dl_read_be32(p + off + 2);
+                pc_gx_dl_apply_cp_stream_reg(st, reg8, data);
+                off += 6;
+                break;
+            }
+            case GX_LOAD_XF_REG: {
+                if (remaining < 5) return;
+                u32 hdr_be = pc_gx_dl_read_be32(p + off + 1);
+                u32 count = ((hdr_be >> 16) & 0x0F) + 1;
+                u32 packet_size = 1 + 4 + count * 4;
+                if (remaining < packet_size) return;
+                off += packet_size;
+                break;
+            }
+            case GX_LOAD_INDX_A:
+            case GX_LOAD_INDX_B:
+            case GX_LOAD_INDX_C:
+            case GX_LOAD_INDX_D:
+                if (remaining < 5) return;
+                off += 5;
+                break;
+            case GX_CMD_CALL_DL:
+            case (GX_CMD_CALL_DL | 0x04):
+                /* 1-byte opcode + 32-bit address + 32-bit size */
+                if (remaining < 9) return;
+                {
+                    u32 dl_addr = pc_gx_dl_read_be32(p + off + 1);
+                    u32 dl_size = pc_gx_dl_read_be32(p + off + 5);
+                    if (dl_addr && dl_size) {
+                        pc_gx_dl_execute_raw_internal((const u8*)(uintptr_t)dl_addr, dl_size, st, depth + 1);
+                    }
+                }
+                off += 9;
+                break;
+            default:
+                return;
+        }
+    }
+}
+
+static void pc_gx_dl_execute_raw(const u8* p, u32 nbytes) {
+    PCGXDLDecodeState st;
+    pc_gx_dl_state_init(&st);
+    pc_gx_dl_execute_raw_internal(p, nbytes, &st, 0);
+}
+
+void GXCallDisplayList(const void* list, u32 nbytes) {
+    if (!list || nbytes == 0) return;
+    pc_gx_commit_pending_and_flush();
+
+    const u8* p = (const u8*)list;
+    if (!pc_gx_dl_try_execute_custom(p, nbytes)) {
+        pc_gx_dl_execute_raw(p, nbytes);
+    }
+}
+void GXCallDisplayListLE(const void* list, u32 nbytes) {
+    GXCallDisplayList(list, nbytes);
+}
+
+/* --- Indirect Texture --- */
+void GXSetTevIndirect(u32 stage, u32 ind_stage, u32 fmt, u32 bias_sel,
+                      u32 mtx_sel, u32 wrap_s, u32 wrap_t, GXBool add_prev,
+                      GXBool ind_lod, u32 alpha_sel);
+
+void GXSetTevDirect(u32 stage) {
+    GXSetTevIndirect(stage, 0/*GX_INDTEXSTAGE0*/, 0/*GX_ITF_8*/, 0/*GX_ITB_NONE*/,
+                     0/*GX_ITM_OFF*/, 0/*GX_ITW_OFF*/, 0/*GX_ITW_OFF*/, 0, 0, 0/*GX_ITBA_OFF*/);
+}
+void GXSetNumIndStages(u8 n) { DIRTY(PC_GX_DIRTY_INDIRECT); g_gx.num_ind_stages = n; }
+
+void GXSetIndTexMtx(u32 mtx_sel, const void* offset, s8 scale) {
+    DIRTY(PC_GX_DIRTY_INDIRECT);
+    int id;
+    switch (mtx_sel) {
+        case 1: case 2: case 3:   id = mtx_sel - 1; break;
+        case 5: case 6: case 7:   id = mtx_sel - 5; break;
+        case 9: case 10: case 11: id = mtx_sel - 9; break;
+        default: return;
+    }
+    if (id < 0 || id >= 3) return;
+    const float* mtx = (const float*)offset;
+    g_gx.ind_mtx[id][0][0] = mtx[0];
+    g_gx.ind_mtx[id][0][1] = mtx[1];
+    g_gx.ind_mtx[id][0][2] = mtx[2];
+    g_gx.ind_mtx[id][1][0] = mtx[3];
+    g_gx.ind_mtx[id][1][1] = mtx[4];
+    g_gx.ind_mtx[id][1][2] = mtx[5];
+    g_gx.ind_mtx_scale[id] = scale;
+}
+
+void GXSetIndTexOrder(u32 ind_stage, u32 tex_coord, u32 tex_map) {
+    DIRTY(PC_GX_DIRTY_INDIRECT);
+    if (ind_stage >= 4) return;
+    g_gx.ind_order[ind_stage].tex_coord = tex_coord;
+    g_gx.ind_order[ind_stage].tex_map = tex_map;
+}
+
+void GXSetTevIndirect(u32 stage, u32 ind_stage, u32 fmt, u32 bias_sel,
+                      u32 mtx_sel, u32 wrap_s, u32 wrap_t, GXBool add_prev,
+                      GXBool ind_lod, u32 alpha_sel) {
+    DIRTY(PC_GX_DIRTY_INDIRECT);
+    if (stage >= 16) return;
+    PCGXTevStage* s = &g_gx.tev_stages[stage];
+    s->ind_stage  = ind_stage;
+    s->ind_format = fmt;
+    s->ind_bias   = bias_sel;
+    s->ind_mtx    = mtx_sel;
+    s->ind_wrap_s = wrap_s;
+    s->ind_wrap_t = wrap_t;
+    s->ind_add_prev = add_prev;
+    s->ind_lod    = ind_lod;
+    s->ind_alpha  = alpha_sel;
+}
+
+void GXSetTevIndWarp(u32 stage, u32 ind_stage, GXBool signed_ofs, GXBool replace, u32 mtx_sel) {
+    u32 wrap = replace ? 6/*GX_ITW_0*/ : 0/*GX_ITW_OFF*/;
+    u32 bias = signed_ofs ? 7/*GX_ITB_STU*/ : 0/*GX_ITB_NONE*/;
+    GXSetTevIndirect(stage, ind_stage, 0/*GX_ITF_8*/, bias, mtx_sel, wrap, wrap, 0, 0, 0);
+}
+
+void GXSetIndTexCoordScale(u32 ind_stage, u32 scale_s, u32 scale_t) {
+    DIRTY(PC_GX_DIRTY_INDIRECT);
+    if (ind_stage >= 4) return;
+    g_gx.ind_order[ind_stage].scale_s = scale_s;
+    g_gx.ind_order[ind_stage].scale_t = scale_t;
+}
+
+void __GXSetIndirectMask(u32 mask) { (void)mask; }
+
+/* --- Z Texture --- */
+void GXSetZTexture(u32 op, u32 fmt, u32 bias) {
+    g_gx.ztex_op = (int)op;
+    g_gx.ztex_fmt = (int)fmt;
+    g_gx.ztex_bias = (int)(bias & 0x00FFFFFF);
+    DIRTY(PC_GX_DIRTY_DEPTH);
+}
+
+/* --- Draw Utility --- */
+static GXVtxDescList s_pc_gx_draw_vcd[GX_MAX_VTXDESCLIST_SZ];
+static GXVtxAttrFmtList s_pc_gx_draw_vat[GX_MAX_VTXATTRFMTLIST_SZ];
+
+static void pc_gx_draw_get_vat_state(u32 vtxfmt, const GXVtxDescList* vcd, GXVtxAttrFmtList* out) {
+    u32 n = 0;
+    u32 i = 0;
+
+    if (!vcd || !out) return;
+
+    while (vcd[i].attr != GX_VA_NULL && n < (GX_MAX_VTXATTRFMTLIST_SZ - 1)) {
+        u32 attr = (u32)vcd[i].attr;
+        u32 cnt = 0;
+        u32 type = 0;
+        u8 frac = 0;
+        GXGetVtxAttrFmt(vtxfmt, attr, &cnt, &type, &frac);
+        out[n].attr = (GXAttr)attr;
+        out[n].cnt = (GXCompCnt)cnt;
+        out[n].type = (GXCompType)type;
+        out[n].frac = frac;
+        ++n;
+        ++i;
+    }
+
+    out[n].attr = GX_VA_NULL;
+    out[n].cnt = 0;
+    out[n].type = 0;
+    out[n].frac = 0;
+}
+
+static void pc_gx_draw_get_vert_state(void) {
+    GXGetVtxDescv(s_pc_gx_draw_vcd);
+    pc_gx_draw_get_vat_state(GX_VTXFMT3, s_pc_gx_draw_vcd, s_pc_gx_draw_vat);
+
+    GXClearVtxDesc();
+    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_NRM, GX_DIRECT);
+    GXSetVtxAttrFmt(GX_VTXFMT3, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT3, GX_VA_NRM, GX_NRM_XYZ, GX_F32, 0);
+}
+
+static void pc_gx_draw_restore_vert_state(void) {
+    GXSetVtxDescv(s_pc_gx_draw_vcd);
+    GXSetVtxAttrFmtv(GX_VTXFMT3, s_pc_gx_draw_vat);
+}
+
+static void pc_gx_draw_vsub(f32* p1, f32* p2, f32* out) {
+    out[0] = p2[0] - p1[0];
+    out[1] = p2[1] - p1[1];
+    out[2] = p2[2] - p1[2];
+}
+
+static void pc_gx_draw_vcross(f32* u, f32* v, f32* out) {
+    f32 n0 = u[1] * v[2] - u[2] * v[1];
+    f32 n1 = u[2] * v[0] - u[0] * v[2];
+    f32 n2 = u[0] * v[1] - u[1] * v[0];
+    out[0] = n0;
+    out[1] = n1;
+    out[2] = n2;
+}
+
+static void pc_gx_draw_normalize(f32* v) {
+    f32 d = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (d <= 1e-12f) {
+        v[0] = 0.0f;
+        v[1] = 0.0f;
+        v[2] = 1.0f;
+        return;
+    }
+    v[0] /= d;
+    v[1] /= d;
+    v[2] /= d;
+}
+
+static void pc_gx_draw_vertex(f32* v, f32* n) {
+    GXPosition3f32(v[0], v[1], v[2]);
+    GXNormal3f32(n[0], n[1], n[2]);
+}
+
+static void pc_gx_draw_dump_triangle(f32* v0, f32* v1, f32* v2) {
+    GXBegin(GX_TRIANGLES, GX_VTXFMT3, 3);
+    pc_gx_draw_vertex(v0, v0);
+    pc_gx_draw_vertex(v1, v1);
+    pc_gx_draw_vertex(v2, v2);
+    GXEnd();
+}
+
+static void pc_gx_draw_subdivide(u8 depth, f32* v0, f32* v1, f32* v2) {
+    f32 v01[3], v12[3], v20[3];
+    u32 i;
+
+    if (depth == 0) {
+        pc_gx_draw_dump_triangle(v0, v1, v2);
+        return;
+    }
+
+    for (i = 0; i < 3; ++i) {
+        v01[i] = v0[i] + v1[i];
+        v12[i] = v1[i] + v2[i];
+        v20[i] = v2[i] + v0[i];
+    }
+
+    pc_gx_draw_normalize(v01);
+    pc_gx_draw_normalize(v12);
+    pc_gx_draw_normalize(v20);
+
+    pc_gx_draw_subdivide((u8)(depth - 1), v0, v01, v20);
+    pc_gx_draw_subdivide((u8)(depth - 1), v1, v12, v01);
+    pc_gx_draw_subdivide((u8)(depth - 1), v2, v20, v12);
+    pc_gx_draw_subdivide((u8)(depth - 1), v01, v12, v20);
+}
+
+static void pc_gx_draw_subdiv_triangle(u8 depth, u8 i, f32 data[][3], u8 ndx[][3]) {
+    f32* x0 = data[ndx[i][0]];
+    f32* x1 = data[ndx[i][1]];
+    f32* x2 = data[ndx[i][2]];
+    pc_gx_draw_subdivide(depth, x0, x1, x2);
+}
+
+void GXDrawCylinder(u8 numEdges) {
+    s32 i;
+    f32 top = 1.0f;
+    f32 bottom = -top;
+    f32 x[100];
+    f32 y[100];
+    f32 angle;
+
+    if (numEdges > 99) numEdges = 99;
+    if (numEdges < 3) numEdges = 3;
+
+    pc_gx_draw_get_vert_state();
+
+    for (i = 0; i <= (s32)numEdges; ++i) {
+        angle = i * 2.0f * 3.14159265358979323846f / numEdges;
+        x[i] = cosf(angle);
+        y[i] = sinf(angle);
+    }
+
+    GXBegin(GX_TRIANGLESTRIP, GX_VTXFMT3, (u16)((numEdges + 1) * 2));
+    for (i = 0; i <= (s32)numEdges; ++i) {
+        GXPosition3f32(x[i], y[i], bottom);
+        GXNormal3f32(x[i], y[i], 0.0f);
+        GXPosition3f32(x[i], y[i], top);
+        GXNormal3f32(x[i], y[i], 0.0f);
+    }
+    GXEnd();
+
+    GXBegin(GX_TRIANGLEFAN, GX_VTXFMT3, (u16)(numEdges + 2));
+    GXPosition3f32(0.0f, 0.0f, top);
+    GXNormal3f32(0.0f, 0.0f, 1.0f);
+    for (i = 0; i <= (s32)numEdges; ++i) {
+        GXPosition3f32(x[i], -y[i], top);
+        GXNormal3f32(0.0f, 0.0f, 1.0f);
+    }
+    GXEnd();
+
+    GXBegin(GX_TRIANGLEFAN, GX_VTXFMT3, (u16)(numEdges + 2));
+    GXPosition3f32(0.0f, 0.0f, bottom);
+    GXNormal3f32(0.0f, 0.0f, -1.0f);
+    for (i = 0; i <= (s32)numEdges; ++i) {
+        GXPosition3f32(x[i], y[i], bottom);
+        GXNormal3f32(0.0f, 0.0f, -1.0f);
+    }
+    GXEnd();
+
+    pc_gx_draw_restore_vert_state();
+}
+
+void GXDrawTorus(f32 rc, u8 numc, u8 numt) {
+    u32 ttype = GX_NONE;
+    s32 i, j;
+    f32 twopi = 2.0f * 3.14159265358979323846f;
+    f32 rt;
+
+    if (rc >= 1.0f) rc = 0.999f;
+    if (rc <= 0.0f) rc = 0.25f;
+    if (numc < 3) numc = 3;
+    if (numt < 3) numt = 3;
+
+    rt = 1.0f - rc;
+    GXGetVtxDesc(GX_VA_TEX0, &ttype);
+    pc_gx_draw_get_vert_state();
+    if (ttype != GX_NONE) {
+        GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+        GXSetVtxAttrFmt(GX_VTXFMT3, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+    }
+
+    for (i = 0; i < (s32)numc; ++i) {
+        GXBegin(GX_TRIANGLES, GX_VTXFMT3, (u16)(numt * 6));
+        for (j = 0; j < (s32)numt; ++j) {
+            s32 s0i = i % (s32)numc;
+            s32 s1i = (i + 1) % (s32)numc;
+            s32 t0i = j % (s32)numt;
+            s32 t1i = (j + 1) % (s32)numt;
+
+            f32 s0 = (f32)s0i;
+            f32 s1 = (f32)s1i;
+            f32 t0 = (f32)t0i;
+            f32 t1 = (f32)t1i;
+
+            f32 c_s0 = cosf(s0 * twopi / numc);
+            f32 s_s0 = sinf(s0 * twopi / numc);
+            f32 c_s1 = cosf(s1 * twopi / numc);
+            f32 s_s1 = sinf(s1 * twopi / numc);
+            f32 c_t0 = cosf(t0 * twopi / numt);
+            f32 s_t0 = sinf(t0 * twopi / numt);
+            f32 c_t1 = cosf(t1 * twopi / numt);
+            f32 s_t1 = sinf(t1 * twopi / numt);
+
+            f32 ax = (rt + rc * c_s1) * c_t0;
+            f32 ay = (rt + rc * c_s1) * s_t0;
+            f32 az = rc * s_s1;
+            f32 anx = c_t0 * c_s1;
+            f32 any = s_t0 * c_s1;
+            f32 anz = s_s1;
+
+            f32 bx = (rt + rc * c_s0) * c_t0;
+            f32 by = (rt + rc * c_s0) * s_t0;
+            f32 bz = rc * s_s0;
+            f32 bnx = c_t0 * c_s0;
+            f32 bny = s_t0 * c_s0;
+            f32 bnz = s_s0;
+
+            f32 cx = (rt + rc * c_s1) * c_t1;
+            f32 cy = (rt + rc * c_s1) * s_t1;
+            f32 cz = rc * s_s1;
+            f32 cnx = c_t1 * c_s1;
+            f32 cny = s_t1 * c_s1;
+            f32 cnz = s_s1;
+
+            f32 dx = (rt + rc * c_s0) * c_t1;
+            f32 dy = (rt + rc * c_s0) * s_t1;
+            f32 dz = rc * s_s0;
+            f32 dnx = c_t1 * c_s0;
+            f32 dny = s_t1 * c_s0;
+            f32 dnz = s_s0;
+
+            /* Triangle 1: a, b, c */
+            GXPosition3f32(ax, ay, az);
+            GXNormal3f32(anx, any, anz);
+            if (ttype != GX_NONE) GXTexCoord2f32((f32)s1i / numc, (f32)t0i / numt);
+
+            GXPosition3f32(bx, by, bz);
+            GXNormal3f32(bnx, bny, bnz);
+            if (ttype != GX_NONE) GXTexCoord2f32((f32)s0i / numc, (f32)t0i / numt);
+
+            GXPosition3f32(cx, cy, cz);
+            GXNormal3f32(cnx, cny, cnz);
+            if (ttype != GX_NONE) GXTexCoord2f32((f32)s1i / numc, (f32)t1i / numt);
+
+            /* Triangle 2: c, b, d */
+            GXPosition3f32(cx, cy, cz);
+            GXNormal3f32(cnx, cny, cnz);
+            if (ttype != GX_NONE) GXTexCoord2f32((f32)s1i / numc, (f32)t1i / numt);
+
+            GXPosition3f32(bx, by, bz);
+            GXNormal3f32(bnx, bny, bnz);
+            if (ttype != GX_NONE) GXTexCoord2f32((f32)s0i / numc, (f32)t0i / numt);
+
+            GXPosition3f32(dx, dy, dz);
+            GXNormal3f32(dnx, dny, dnz);
+            if (ttype != GX_NONE) GXTexCoord2f32((f32)s0i / numc, (f32)t1i / numt);
+        }
+        GXEnd();
+    }
+
+    pc_gx_draw_restore_vert_state();
+}
+
+void GXDrawSphere(u8 numMajor, u8 numMinor) {
+    u32 ttype = GX_NONE;
+    f32 radius = 1.0f;
+    f32 majorStep;
+    f32 minorStep;
+    s32 i, j;
+
+    if (numMajor < 2) numMajor = 2;
+    if (numMinor < 3) numMinor = 3;
+    majorStep = (3.14159265358979323846f / numMajor);
+    minorStep = (2.0f * 3.14159265358979323846f / numMinor);
+
+    GXGetVtxDesc(GX_VA_TEX0, &ttype);
+    pc_gx_draw_get_vert_state();
+    if (ttype != GX_NONE) {
+        GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+        GXSetVtxAttrFmt(GX_VTXFMT3, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+    }
+
+    for (i = 0; i < (s32)numMajor; ++i) {
+        f32 a = i * majorStep;
+        f32 b = a + majorStep;
+        f32 r0 = radius * sinf(a);
+        f32 r1 = radius * sinf(b);
+        f32 z0 = radius * cosf(a);
+        f32 z1 = radius * cosf(b);
+
+        GXBegin(GX_TRIANGLESTRIP, GX_VTXFMT3, (u16)((numMinor + 1) * 2));
+        for (j = 0; j <= (s32)numMinor; ++j) {
+            f32 c = j * minorStep;
+            f32 x = cosf(c);
+            f32 y = sinf(c);
+
+            GXPosition3f32(x * r1, y * r1, z1);
+            GXNormal3f32((x * r1) / radius, (y * r1) / radius, z1 / radius);
+            if (ttype != GX_NONE) {
+                GXTexCoord2f32(j / (f32)numMinor, (i + 1) / (f32)numMajor);
+            }
+
+            GXPosition3f32(x * r0, y * r0, z0);
+            GXNormal3f32((x * r0) / radius, (y * r0) / radius, z0 / radius);
+            if (ttype != GX_NONE) {
+                GXTexCoord2f32(j / (f32)numMinor, (i + 0) / (f32)numMajor);
+            }
+        }
+        GXEnd();
+    }
+
+    pc_gx_draw_restore_vert_state();
+}
+
+static void pc_gx_draw_cube_face(f32 nx, f32 ny, f32 nz,
+                                 f32 tx, f32 ty, f32 tz,
+                                 f32 bx, f32 by, f32 bz,
+                                 u32 binormal, u32 texture) {
+    const f32 sz = 1.0f / 1.732050808f;
+
+    GXPosition3f32((nx + tx + bx) * sz, (ny + ty + by) * sz, (nz + tz + bz) * sz);
+    GXNormal3f32(nx, ny, nz);
+    if (binormal != GX_NONE) {
+        GXNormal3f32(tx, ty, tz);
+        GXNormal3f32(bx, by, bz);
+    }
+    if (texture != GX_NONE) {
+        GXTexCoord2s8(1, 1);
+    }
+
+    GXPosition3f32((nx - tx + bx) * sz, (ny - ty + by) * sz, (nz - tz + bz) * sz);
+    GXNormal3f32(nx, ny, nz);
+    if (binormal != GX_NONE) {
+        GXNormal3f32(tx, ty, tz);
+        GXNormal3f32(bx, by, bz);
+    }
+    if (texture != GX_NONE) {
+        GXTexCoord2s8(0, 1);
+    }
+
+    GXPosition3f32((nx - tx - bx) * sz, (ny - ty - by) * sz, (nz - tz - bz) * sz);
+    GXNormal3f32(nx, ny, nz);
+    if (binormal != GX_NONE) {
+        GXNormal3f32(tx, ty, tz);
+        GXNormal3f32(bx, by, bz);
+    }
+    if (texture != GX_NONE) {
+        GXTexCoord2s8(0, 0);
+    }
+
+    GXPosition3f32((nx + tx - bx) * sz, (ny + ty - by) * sz, (nz + tz - bz) * sz);
+    GXNormal3f32(nx, ny, nz);
+    if (binormal != GX_NONE) {
+        GXNormal3f32(tx, ty, tz);
+        GXNormal3f32(bx, by, bz);
+    }
+    if (texture != GX_NONE) {
+        GXTexCoord2s8(1, 0);
+    }
+}
+
+void GXDrawCube(void) {
+    u32 ntype = GX_NONE;
+    u32 ttype = GX_NONE;
+
+    GXGetVtxDesc(GX_VA_NBT, &ntype);
+    GXGetVtxDesc(GX_VA_TEX0, &ttype);
+    pc_gx_draw_get_vert_state();
+
+    if (ntype != GX_NONE) {
+        GXSetVtxDesc(GX_VA_NBT, GX_DIRECT);
+        GXSetVtxAttrFmt(GX_VTXFMT3, GX_VA_NBT, GX_NRM_NBT, GX_F32, 0);
+    }
+    if (ttype != GX_NONE) {
+        GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+        GXSetVtxAttrFmt(GX_VTXFMT3, GX_VA_TEX0, GX_TEX_ST, GX_S8, 0);
+    }
+
+    GXBegin(GX_QUADS, GX_VTXFMT3, 24);
+    pc_gx_draw_cube_face(-1.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, ntype, ttype);
+    pc_gx_draw_cube_face( 1.0f, 0.0f, 0.0f, 0.0f, 1.0f,  0.0f, 0.0f, 0.0f, -1.0f, ntype, ttype);
+    pc_gx_draw_cube_face( 0.0f,-1.0f, 0.0f,-1.0f, 0.0f,  0.0f, 0.0f, 0.0f,  1.0f, ntype, ttype);
+    pc_gx_draw_cube_face( 0.0f, 1.0f, 0.0f, 0.0f, 0.0f,  1.0f,-1.0f, 0.0f,  0.0f, ntype, ttype);
+    pc_gx_draw_cube_face( 0.0f, 0.0f,-1.0f, 0.0f,-1.0f,  0.0f, 1.0f, 0.0f,  0.0f, ntype, ttype);
+    pc_gx_draw_cube_face( 0.0f, 0.0f, 1.0f, 1.0f, 0.0f,  0.0f, 0.0f,-1.0f,  0.0f, ntype, ttype);
+    GXEnd();
+
+    pc_gx_draw_restore_vert_state();
+}
+
+static f32 s_pc_gx_odata[6][3] = {
+    { 1.0f,  0.0f,  0.0f },
+    { -1.0f, 0.0f,  0.0f },
+    { 0.0f,  1.0f,  0.0f },
+    { 0.0f, -1.0f,  0.0f },
+    { 0.0f,  0.0f,  1.0f },
+    { 0.0f,  0.0f, -1.0f },
+};
+static u8 s_pc_gx_ondex[8][3] = {
+    {0,4,2}, {1,2,4}, {0,3,4}, {1,4,3},
+    {0,2,5}, {1,5,2}, {0,5,3}, {1,3,5},
+};
+
+void GXDrawOctahedron(void) {
+    s32 i;
+    pc_gx_draw_get_vert_state();
+    for (i = 7; i >= 0; --i) {
+        pc_gx_draw_subdiv_triangle(0, (u8)i, s_pc_gx_odata, s_pc_gx_ondex);
+    }
+    pc_gx_draw_restore_vert_state();
+}
+
+static f32 s_pc_gx_idata[12][3] = {
+    {-0.525731112119133606f, 0.0f,  0.850650808352039932f},
+    { 0.525731112119133606f, 0.0f,  0.850650808352039932f},
+    {-0.525731112119133606f, 0.0f, -0.850650808352039932f},
+    { 0.525731112119133606f, 0.0f, -0.850650808352039932f},
+    { 0.0f,  0.850650808352039932f,  0.525731112119133606f},
+    { 0.0f,  0.850650808352039932f, -0.525731112119133606f},
+    { 0.0f, -0.850650808352039932f,  0.525731112119133606f},
+    { 0.0f, -0.850650808352039932f, -0.525731112119133606f},
+    { 0.850650808352039932f,  0.525731112119133606f, 0.0f},
+    {-0.850650808352039932f,  0.525731112119133606f, 0.0f},
+    { 0.850650808352039932f, -0.525731112119133606f, 0.0f},
+    {-0.850650808352039932f, -0.525731112119133606f, 0.0f},
+};
+static u8 s_pc_gx_index[20][3] = {
+    {0,4,1}, {0,9,4}, {9,5,4}, {4,5,8}, {4,8,1},
+    {8,10,1}, {8,3,10}, {5,3,8}, {5,2,3}, {2,7,3},
+    {7,10,3}, {7,6,10}, {7,11,6}, {11,0,6}, {0,1,6},
+    {6,1,10}, {9,0,11}, {9,11,2}, {9,2,5}, {7,2,11},
+};
+
+void GXDrawIcosahedron(void) {
+    s32 i;
+    pc_gx_draw_get_vert_state();
+    for (i = 19; i >= 0; --i) {
+        pc_gx_draw_subdiv_triangle(0, (u8)i, s_pc_gx_idata, s_pc_gx_index);
+    }
+    pc_gx_draw_restore_vert_state();
+}
+
+void GXDrawSphere1(u8 depth) {
+    s32 i;
+    pc_gx_draw_get_vert_state();
+    for (i = 19; i >= 0; --i) {
+        pc_gx_draw_subdiv_triangle(depth, (u8)i, s_pc_gx_idata, s_pc_gx_index);
+    }
+    pc_gx_draw_restore_vert_state();
+}
+
+static u32 s_pc_gx_dodeca_polygons[12][5] = {
+    {0, 12, 10, 11, 16},
+    {1, 17, 8, 9, 13},
+    {2, 14, 9, 8, 18},
+    {3, 19, 11, 10, 15},
+    {4, 14, 2, 3, 15},
+    {5, 12, 0, 1, 13},
+    {6, 17, 1, 0, 16},
+    {7, 19, 3, 2, 18},
+    {8, 17, 6, 7, 18},
+    {9, 14, 4, 5, 13},
+    {10, 12, 5, 4, 15},
+    {11, 19, 7, 6, 16},
+};
+
+static f32 s_pc_gx_dodeca_verts[20][3] = {
+    {-0.809015f, 0.0f,      0.309015f},
+    {-0.809015f, 0.0f,     -0.309015f},
+    { 0.809015f, 0.0f,     -0.309015f},
+    { 0.809015f, 0.0f,      0.309015f},
+    { 0.309015f,-0.809015f, 0.0f},
+    {-0.309015f,-0.809015f, 0.0f},
+    {-0.309015f, 0.809015f, 0.0f},
+    { 0.309015f, 0.809015f, 0.0f},
+    { 0.0f,      0.309015f,-0.809015f},
+    { 0.0f,     -0.309015f,-0.809015f},
+    { 0.0f,     -0.309015f, 0.809015f},
+    { 0.0f,      0.309015f, 0.809015f},
+    {-0.5f,     -0.5f,      0.5f},
+    {-0.5f,     -0.5f,     -0.5f},
+    { 0.5f,     -0.5f,     -0.5f},
+    { 0.5f,     -0.5f,      0.5f},
+    {-0.5f,      0.5f,      0.5f},
+    {-0.5f,      0.5f,     -0.5f},
+    { 0.5f,      0.5f,     -0.5f},
+    { 0.5f,      0.5f,      0.5f},
+};
+
+void GXDrawDodeca(void) {
+    u32 i;
+    pc_gx_draw_get_vert_state();
+
+    for (i = 0; i < 12; ++i) {
+        f32 *p0, *p1, *p2;
+        f32 u[3], v[3], n[3];
+        p0 = &s_pc_gx_dodeca_verts[s_pc_gx_dodeca_polygons[i][0]][0];
+        p1 = &s_pc_gx_dodeca_verts[s_pc_gx_dodeca_polygons[i][1]][0];
+        p2 = &s_pc_gx_dodeca_verts[s_pc_gx_dodeca_polygons[i][2]][0];
+
+        pc_gx_draw_vsub(p1, p2, u);
+        pc_gx_draw_vsub(p1, p0, v);
+        pc_gx_draw_vcross(u, v, n);
+        pc_gx_draw_normalize(n);
+
+        GXBegin(GX_TRIANGLEFAN, GX_VTXFMT3, 5);
+        pc_gx_draw_vertex(s_pc_gx_dodeca_verts[s_pc_gx_dodeca_polygons[i][4]], n);
+        pc_gx_draw_vertex(s_pc_gx_dodeca_verts[s_pc_gx_dodeca_polygons[i][3]], n);
+        pc_gx_draw_vertex(p2, n);
+        pc_gx_draw_vertex(p1, n);
+        pc_gx_draw_vertex(p0, n);
+        GXEnd();
+    }
+
+    pc_gx_draw_restore_vert_state();
+}
+
+/* --- Perf --- */
+void GXReadXfRasMetric(u32* xf_wait_in, u32* xf_wait_out, u32* ras_busy, u32* clocks) {
+    if (xf_wait_in) *xf_wait_in = 0;
+    if (xf_wait_out) *xf_wait_out = 0;
+    if (ras_busy) *ras_busy = 0;
+    if (clocks) *clocks = 0;
+}
+
+/* --- Verify --- */
+void GXSetVerifyLevel(u32 level) { (void)level; }
+void* GXSetVerifyCallback(void* cb) { return NULL; }
+
+void GXResetStreamState(void) {
+    g_gx.in_begin = 0;
+    g_gx.vertex_pending = 0;
+    g_gx.current_vertex_idx = 0;
+    memset(&g_gx.current_vertex, 0, sizeof(g_gx.current_vertex));
+}
+
+

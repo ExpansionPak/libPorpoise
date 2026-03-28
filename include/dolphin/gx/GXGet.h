@@ -16,8 +16,14 @@ GXTexWrapMode GXGetTexObjWrapS(GXTexObj* tex_obj);
 GXTexWrapMode GXGetTexObjWrapT(GXTexObj* tex_obj);
 void* GXGetTexObjData(GXTexObj* tex_obj);
 void GXGetProjectionv(f32* p);
+void GXGetViewportv(f32* vp);
+void GXGetLightAttnA(GXLightObj* lt_obj, f32* a0, f32* a1, f32* a2);
+void GXGetLightAttnK(GXLightObj* lt_obj, f32* k0, f32* k1, f32* k2);
 void GXGetLightPos(GXLightObj* lt_obj, f32* x, f32* y, f32* z);
+void GXGetLightDir(GXLightObj* lt_obj, f32* nx, f32* ny, f32* nz);
 void GXGetLightColor(GXLightObj* lt_obj, GXColor* color);
+void GXGetVtxDesc(GXAttr attr, GXAttrType* type);
+void GXGetVtxDescv(GXVtxDescList* list);
 void GXGetVtxAttrFmt(GXVtxFmt idx, GXAttr attr, GXCompCnt* compCnt, GXCompType* compType, u8* shift);
 
 #ifdef __cplusplus

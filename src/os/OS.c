@@ -68,6 +68,8 @@ static void* s_mem2ArenaLo = NULL;
 
   Returns:      None.
  *---------------------------------------------------------------------------*/
+extern void __OSThreadInit(void);
+
 void OSInit(void) {
     if (s_osInitialized) {
         return;
@@ -78,6 +80,8 @@ void OSInit(void) {
 #ifdef _WIN32
     EnsureConsole();
 #endif
+    
+    __OSThreadInit();
     
     // On PC, we don't pre-allocate memory arenas like the original hardware
     // Games can use malloc directly, or call OSInitAlloc() with their own ranges
@@ -233,22 +237,30 @@ void OSReport(const char* fmt, ...) {
  *---------------------------------------------------------------------------*/
 void OSPanic(const char* file, int line, const char* fmt, ...) {
     va_list args;
-    
-    //fprintf(stderr, "\n");
+    char buf[256];
+    int is_graceful = 0;
+
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    /* Treat "End of test/demo/program" as normal shutdown - exit cleanly */
+    if (strstr(buf, "End of test") || strstr(buf, "End of demo") ||
+        strstr(buf, "End of program") || strstr(buf, "End of demo\n")) {
+        is_graceful = 1;
+    }
+
     fprintf(stderr, "========================================\n");
-    fprintf(stderr, "         PANIC - FATAL ERROR\n");
+    fprintf(stderr, "%s\n", is_graceful ? "         Demo Ended" : "         PANIC - FATAL ERROR");
     fprintf(stderr, "========================================\n");
     fprintf(stderr, "Location: %s:%d\n", file, line);
-    fprintf(stderr, "Message:  ");
-    
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
-    
-    fprintf(stderr, "\n");
+    fprintf(stderr, "Message:  %s\n", buf);
     fprintf(stderr, "========================================\n");
     fflush(stderr);
-    
+
+    if (is_graceful) {
+        exit(0);
+    }
     abort();
 }
 

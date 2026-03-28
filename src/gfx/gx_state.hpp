@@ -263,7 +263,7 @@ struct GXState {
   bool stateDirty = true;
 };
 
-extern GXState g_gxState;
+GXState& g_gxState();
 
 } // namespace porpoise::gfx::gx
 

@@ -127,6 +127,11 @@ typedef enum {
   GX_VA_NULL = 0xFF,
 } GXAttr;
 
+#define GX_MAX_VTXDESC GX_VA_MAX_ATTR
+#define GX_MAX_VTXDESCLIST_SZ (GX_MAX_VTXDESC + 1)    /* +1 for GX_VA_NULL */
+#define GX_MAX_VTXATTRFMT GX_VA_MAX_ATTR
+#define GX_MAX_VTXATTRFMTLIST_SZ (GX_MAX_VTXATTRFMT + 1) /* +1 for GX_VA_NULL */
+
 typedef enum {
   GX_NONE,
   GX_DIRECT,
@@ -550,6 +555,7 @@ typedef enum {
   GX_CC_ONE,
   GX_CC_HALF,
   GX_CC_KONST,
+  GX_CC_QUARTER = GX_CC_KONST,
   GX_CC_ZERO
 } GXTevColorArg;
 

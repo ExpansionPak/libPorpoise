@@ -3,7 +3,6 @@
 
 namespace {
 inline void notify_transform_state() {
-  porpoise::gfx::bridge::notify_state(porpoise::gfx::bridge::Action::Transform);
 }
 
 static porpoise::Mat4x4<float> to_mat4x4_col_major(const void* mtx_) {
@@ -44,8 +43,8 @@ extern "C" {
 
 void GXSetProjection(const void* mtx_, GXProjectionType type) {
   const auto mtx = to_mat4x4_col_major(mtx_);
-  g_gxState.projType = type;
-  update_gx_state(g_gxState.proj, mtx);
+  g_gxState().projType = type;
+  update_gx_state(g_gxState().proj, mtx);
   notify_transform_state();
 }
 
@@ -53,11 +52,11 @@ void GXSetProjection(const void* mtx_, GXProjectionType type) {
 
 void GXLoadPosMtxImm(const void* mtx_, u32 id) {
   CHECK(id >= GX_PNMTX0 && id <= GX_PNMTX9, "invalid pn mtx {}", static_cast<int>(id));
-  auto& state = g_gxState.pnMtx[id / 3];
+  auto& state = g_gxState().pnMtx[id / 3];
   const auto mtx = to_mat3x4_col_major(mtx_);
   update_gx_state(state.pos, mtx);
   // Set the current matrix to the one we just loaded
-  update_gx_state(g_gxState.currentPnMtx, id / 3);
+  update_gx_state(g_gxState().currentPnMtx, id / 3);
   notify_transform_state();
 }
 
@@ -65,7 +64,7 @@ void GXLoadPosMtxImm(const void* mtx_, u32 id) {
 
 void GXLoadNrmMtxImm(const void* mtx_, u32 id) {
   CHECK(id >= GX_PNMTX0 && id <= GX_PNMTX9, "invalid pn mtx {}", static_cast<int>(id));
-  auto& state = g_gxState.pnMtx[id / 3];
+  auto& state = g_gxState().pnMtx[id / 3];
   const auto mtx = to_mat3x4_col_major(mtx_);
   update_gx_state(state.nrm, mtx);
   notify_transform_state();
@@ -76,7 +75,7 @@ void GXLoadNrmMtxImm(const void* mtx_, u32 id) {
 
 void GXSetCurrentMtx(u32 id) {
   CHECK(id >= GX_PNMTX0 && id <= GX_PNMTX9, "invalid pn mtx {}", id);
-  update_gx_state(g_gxState.currentPnMtx, id / 3);
+  update_gx_state(g_gxState().currentPnMtx, id / 3);
   notify_transform_state();
 }
 
@@ -87,18 +86,18 @@ void GXLoadTexMtxImm(const void* mtx_, u32 id, GXTexMtxType type) {
     CHECK(type == GX_MTX3x4, "invalid pt mtx type {}", underlying(type));
     const auto idx = (id - GX_PTTEXMTX0) / 3;
     const auto mtx = to_mat3x4_col_major(mtx_);
-    update_gx_state(g_gxState.ptTexMtxs[idx], mtx);
+    update_gx_state(g_gxState().ptTexMtxs[idx], mtx);
   } else {
     const auto idx = (id - GX_TEXMTX0) / 3;
     switch (type) {
     case GX_MTX3x4: {
       const auto mtx = to_mat3x4_col_major(mtx_);
-      update_gx_state<porpoise::gfx::gx::TexMtxVariant>(g_gxState.texMtxs[idx], mtx);
+      update_gx_state<porpoise::gfx::gx::TexMtxVariant>(g_gxState().texMtxs[idx], mtx);
       break;
     }
     case GX_MTX2x4: {
       const auto mtx = to_mat2x4_col_major(mtx_);
-      update_gx_state<porpoise::gfx::gx::TexMtxVariant>(g_gxState.texMtxs[idx], mtx);
+      update_gx_state<porpoise::gfx::gx::TexMtxVariant>(g_gxState().texMtxs[idx], mtx);
       break;
     }
     }
@@ -110,24 +109,24 @@ void GXLoadTexMtxImm(const void* mtx_, u32 id, GXTexMtxType type) {
 // TODO GXProject
 
 void GXSetViewport(float left, float top, float width, float height, float nearZ, float farZ) {
-    g_gxState.viewportLeft = left;
-    g_gxState.viewportTop = top;
-    g_gxState.viewportWidth = width;
-    g_gxState.viewportHeight = height;
-    g_gxState.viewportNear = nearZ;
-    g_gxState.viewportFar = farZ;
+    g_gxState().viewportLeft = left;
+    g_gxState().viewportTop = top;
+    g_gxState().viewportWidth = width;
+    g_gxState().viewportHeight = height;
+    g_gxState().viewportNear = nearZ;
+    g_gxState().viewportFar = farZ;
     porpoise::gfx::set_viewport(left, top, width, height, nearZ, farZ);
     notify_transform_state();
 }
 
 void GXSetViewportJitter(float left, float top, float width, float height, float nearZ, float farZ, u32 field) {
     (void)field;
-    g_gxState.viewportLeft = left;
-    g_gxState.viewportTop = top;
-    g_gxState.viewportWidth = width;
-    g_gxState.viewportHeight = height;
-    g_gxState.viewportNear = nearZ;
-    g_gxState.viewportFar = farZ;
+    g_gxState().viewportLeft = left;
+    g_gxState().viewportTop = top;
+    g_gxState().viewportWidth = width;
+    g_gxState().viewportHeight = height;
+    g_gxState().viewportNear = nearZ;
+    g_gxState().viewportFar = farZ;
     porpoise::gfx::set_viewport(left, top, width, height, nearZ, farZ);
     notify_transform_state();
 }

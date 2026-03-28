@@ -36,6 +36,7 @@ typedef struct OSFontHeader
 
 #define OS_FONT_ENCODE_ANSI     0u
 #define OS_FONT_ENCODE_SJIS     1u
+#define OS_FONT_ENCODE_UNK2     2u
 #define OS_FONT_ENCODE_UTF8     3u
 #define OS_FONT_ENCODE_UTF16    4u
 #define OS_FONT_ENCODE_UTF32    5u
