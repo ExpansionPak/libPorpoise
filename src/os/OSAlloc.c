@@ -35,24 +35,24 @@ static NTSTATUS (NTAPI *pNtAllocateVirtualMemory)(HANDLE, void**, unsigned long 
 #endif
 
 /* Alignment and sizing macros */
-#define OFFSET(n, a)    (((u32)(n)) & ((a) - 1))
-#define TRUNC(n, a)     (((u32)(n)) & ~((a) - 1))
-#define ROUND(n, a)     (((u32)(n) + (a) - 1) & ~((a) - 1))
+#define OFFSET(n, a)    ((uintptr_t)(n) & ((uintptr_t)(a) - (uintptr_t)1u))
+#define TRUNC(n, a)     ((uintptr_t)(n) & ~((uintptr_t)(a) - (uintptr_t)1u))
+#define ROUND(n, a)     ((((uintptr_t)(n) + ((uintptr_t)(a) - (uintptr_t)1u))) & ~((uintptr_t)(a) - (uintptr_t)1u))
 
 #define ALIGNMENT       32
-#define HEADERSIZE      ROUND(sizeof(Cell), ALIGNMENT)
+#define HEADERSIZE      ((u32)ROUND(sizeof(Cell), ALIGNMENT))
 #define MINOBJSIZE      (HEADERSIZE + ALIGNMENT)
 
 /* Range checking macros */
 #define InRange(targ, a, b) \
-    ((u32)(a) <= (u32)(targ) && (u32)(targ) < (u32)(b))
+    ((uintptr_t)(a) <= (uintptr_t)(targ) && (uintptr_t)(targ) < (uintptr_t)(b))
 
 #define RangeOverlap(aStart, aEnd, bStart, bEnd) \
-    ((u32)(bStart) <= (u32)(aStart) && (u32)(aStart) < (u32)(bEnd) || \
-     (u32)(bStart) < (u32)(aEnd) && (u32)(aEnd) <= (u32)(bEnd))
+    (((uintptr_t)(bStart) <= (uintptr_t)(aStart) && (uintptr_t)(aStart) < (uintptr_t)(bEnd)) || \
+     ((uintptr_t)(bStart) < (uintptr_t)(aEnd) && (uintptr_t)(aEnd) <= (uintptr_t)(bEnd)))
 
 #define RangeSubset(aStart, aEnd, bStart, bEnd) \
-    ((u32)(bStart) <= (u32)(aStart) && (u32)(aEnd) <= (u32)(bEnd))
+    ((uintptr_t)(bStart) <= (uintptr_t)(aStart) && (uintptr_t)(aEnd) <= (uintptr_t)(bEnd))
 
 /*---------------------------------------------------------------------------*
   Cell - Header for each memory block (free or allocated)
@@ -228,13 +228,15 @@ void* OSInitAlloc(void* arenaStart, void* arenaEnd, int maxHeaps) {
         if (needLow4GB) {
             /* Try VirtualAlloc at fixed low addresses - must succeed for u32 truncation.
              * Games like Pikmin use u32 for heap addresses; arena must be in lower 4GB. */
-            static const unsigned long lowAddrs[] = {
-                0x10000000ul, 0x11000000ul, 0x12000000ul, 0x13000000ul, 0x14000000ul,
-                0x20000000ul, 0x21000000ul, 0x30000000ul, 0x40000000ul, 0x50000000ul
+            static const uintptr_t lowAddrs[] = {
+                (uintptr_t)0x10000000u, (uintptr_t)0x11000000u, (uintptr_t)0x12000000u,
+                (uintptr_t)0x13000000u, (uintptr_t)0x14000000u, (uintptr_t)0x20000000u,
+                (uintptr_t)0x21000000u, (uintptr_t)0x30000000u, (uintptr_t)0x40000000u,
+                (uintptr_t)0x50000000u
             };
             int i, n = (int)(sizeof(lowAddrs) / sizeof(lowAddrs[0]));
             for (i = 0; i < n; i++) {
-                void* p = VirtualAlloc((void*)lowAddrs[i], defaultSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                void* p = VirtualAlloc((void*)(uintptr_t)lowAddrs[i], defaultSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
                 if (p != NULL) {
                     arenaStart = p;
                     break;
@@ -329,10 +331,13 @@ void* OSInitAlloc(void* arenaStart, void* arenaEnd, int maxHeaps) {
 void* OSAllocLow4GB(size_t size) {
 #ifdef _WIN32
 #if defined(_M_X64) || defined(__x86_64__)
-    static const unsigned long addrs[] = { 0x10000000ul, 0x20000000ul, 0x30000000ul, 0x40000000ul };
+    static const uintptr_t addrs[] = {
+        (uintptr_t)0x10000000u, (uintptr_t)0x20000000u,
+        (uintptr_t)0x30000000u, (uintptr_t)0x40000000u
+    };
     int i, n = (int)(sizeof(addrs) / sizeof(addrs[0]));
     for (i = 0; i < n; i++) {
-        void* p = VirtualAlloc((void*)addrs[i], size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        void* p = VirtualAlloc((void*)(uintptr_t)addrs[i], size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (p != NULL) return p;
     }
     return NULL;
@@ -614,7 +619,7 @@ void* OSAllocFromHeap(OSHeapHandle heap, u32 size) {
     
     // Add header size and round to alignment
     size += HEADERSIZE;
-    size = ROUND(size, ALIGNMENT);
+    size = (u32)ROUND(size, ALIGNMENT);
     
     // Search free list for first fit
     Cell* cell;

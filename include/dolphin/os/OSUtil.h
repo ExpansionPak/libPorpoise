@@ -36,35 +36,42 @@ extern "C" {
 #endif
 
 #ifndef OSRoundUp32B
-#define OSRoundUp32B(x)   (((u32)(x) + 0x1F) & ~(0x1F))
+#define OSRoundUp32B(x) \
+    ((uintptr_t)(((uintptr_t)(x) + (uintptr_t)0x1Fu) & ~((uintptr_t)0x1Fu)))
 #endif
 
 #ifndef OSRoundDown32B
-#define OSRoundDown32B(x) (((u32)(x)) & ~(0x1F))
+#define OSRoundDown32B(x) ((uintptr_t)((uintptr_t)(x) & ~((uintptr_t)0x1Fu)))
 #endif
 
 #ifndef OSPhysicalToCached
-#define OSPhysicalToCached(paddr)    ((void*)((u32)(paddr) + OS_BASE_CACHED))
+#define OSPhysicalToCached(paddr) \
+    ((void*)((uintptr_t)(paddr) + (uintptr_t)OS_BASE_CACHED))
 #endif
 
 #ifndef OSPhysicalToUncached
-#define OSPhysicalToUncached(paddr)  ((void*)((u32)(paddr) + OS_BASE_UNCACHED))
+#define OSPhysicalToUncached(paddr) \
+    ((void*)((uintptr_t)(paddr) + (uintptr_t)OS_BASE_UNCACHED))
 #endif
 
 #ifndef OSCachedToPhysical
-#define OSCachedToPhysical(caddr)    ((u32)((u8*)(caddr) - OS_BASE_CACHED))
+#define OSCachedToPhysical(caddr) \
+    ((u32)((uintptr_t)(caddr) - (uintptr_t)OS_BASE_CACHED))
 #endif
 
 #ifndef OSUncachedToPhysical
-#define OSUncachedToPhysical(ucaddr) ((u32)((u8*)(ucaddr) - OS_BASE_UNCACHED))
+#define OSUncachedToPhysical(ucaddr) \
+    ((u32)((uintptr_t)(ucaddr) - (uintptr_t)OS_BASE_UNCACHED))
 #endif
 
 #ifndef OSCachedToUncached
-#define OSCachedToUncached(caddr)    ((void*)((u8*)(caddr) + (OS_BASE_UNCACHED - OS_BASE_CACHED)))
+#define OSCachedToUncached(caddr) \
+    ((void*)((uintptr_t)(caddr) + ((uintptr_t)OS_BASE_UNCACHED - (uintptr_t)OS_BASE_CACHED)))
 #endif
 
 #ifndef OSUncachedToCached
-#define OSUncachedToCached(ucaddr)   ((void*)((u8*)(ucaddr) - (OS_BASE_UNCACHED - OS_BASE_CACHED)))
+#define OSUncachedToCached(ucaddr) \
+    ((void*)((uintptr_t)(ucaddr) - ((uintptr_t)OS_BASE_UNCACHED - (uintptr_t)OS_BASE_CACHED)))
 #endif
 
 #ifndef OS_SYS_CALL_HANDLER
