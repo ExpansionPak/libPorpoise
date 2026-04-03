@@ -77,6 +77,7 @@ typedef struct {
     int alpha_a, alpha_b, alpha_c, alpha_d;
     int color_op, color_bias, color_scale, color_clamp, color_out;
     int alpha_op, alpha_bias, alpha_scale, alpha_clamp, alpha_out;
+    int clamp_mode;
     int tex_coord, tex_map, color_chan;
     int k_color_sel, k_alpha_sel;
     int ras_swap, tex_swap;
@@ -102,6 +103,12 @@ typedef struct {
     /* Vertex descriptor */
     int vtx_desc[PC_GX_MAX_ATTR];
     PCGXVertexFormat vtx_fmt[PC_GX_MAX_VTXFMT];
+    u8 line_width;
+    u8 point_size;
+    u32 line_tex_offset;
+    u32 point_tex_offset;
+    u8 tex_offset_line_enable[8];
+    u8 tex_offset_point_enable[8];
 
     /* Transforms */
     float projection_mtx[4][4];
@@ -128,6 +135,7 @@ typedef struct {
     int tex_gen_type[8];
     int tex_gen_src[8];
     int tex_gen_mtx[8];
+    int tex_gen_normalize[8];
     GLuint gl_textures[8];
     int tex_obj_w[8];
     int tex_obj_h[8];
@@ -160,8 +168,35 @@ typedef struct {
     int z_compare_enable;
     int z_compare_func;
     int z_update_enable;
+    int z_comp_loc_before_tex;
+    int dither_enable;
     int color_update_enable;
     int alpha_update_enable;
+    int dst_alpha_enable;
+    int dst_alpha_value;
+    int field_mode;
+    int field_half_aspect;
+    int field_mask_odd;
+    int field_mask_even;
+    int pixel_fmt;
+    int z_fmt;
+
+    /* CPU Direct EFB Access (GXPoke/GXPeek state) */
+    int poke_alpha_func;
+    int poke_alpha_threshold;
+    int poke_alpha_read_mode;
+    int poke_alpha_update_enable;
+    int poke_color_update_enable;
+    int poke_dst_alpha_enable;
+    int poke_dst_alpha_value;
+    int poke_dither_enable;
+    int poke_z_compare_enable;
+    int poke_z_compare_func;
+    int poke_z_update_enable;
+    int poke_blend_mode;
+    int poke_blend_src;
+    int poke_blend_dst;
+    int poke_blend_logic_op;
 
     /* Alpha compare */
     int alpha_comp0;
@@ -171,6 +206,8 @@ typedef struct {
     int alpha_ref1;
 
     int cull_mode;
+    int clip_mode;
+    int coplanar_enable;
     int ztex_op;
     int ztex_fmt;
     int ztex_bias;
@@ -230,7 +267,7 @@ typedef struct {
         GLint light_mask, light_pos[8], light_dir[8], light_color[8];
         GLint light_cos_att[8], light_dist_att[8];
         GLint light_mask1;
-        GLint texmtx_enable[4], texmtx_row0[4], texmtx_row1[4], texgen_src[4];
+        GLint texmtx_enable[4], texmtx_row0[4], texmtx_row1[4], texgen_src[4], texgen_type[4], texgen_normalize[4];
         GLint use_texture[PC_GX_MAX_TEV_STAGES];
         GLint texture[PC_GX_MAX_TEV_STAGES];
         GLint tev_tc_src[PC_GX_MAX_TEV_STAGES];
@@ -252,6 +289,11 @@ typedef struct {
     int copy_src[4];       /* left, top, w, h */
     int copy_dst[2];       /* w, h */
     int copy_clamp;
+    int copy_gamma;
+    int copy_frame2field;
+    float copy_yscale;
+    int copy_yscale_reg;
+    u8  copy_sample_pattern[12][2];
     int tex_copy_src[4];
     int tex_copy_dst[2];
     unsigned int tex_copy_fmt;
@@ -259,6 +301,11 @@ typedef struct {
     int copy_aa_enable;
     int copy_vf_enable;
     u8  copy_vfilter[7];
+    int bbox_valid;
+    u16 bbox_left;
+    u16 bbox_top;
+    u16 bbox_right;
+    u16 bbox_bottom;
 
     /* Indexed vertex data */
     const void* array_base[PC_GX_MAX_ATTR];
