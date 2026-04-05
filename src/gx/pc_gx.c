@@ -26,6 +26,8 @@ u32 GXCompressZ16(u32 z24, GXZFmt16 zfmt);
 u32 GXDecompressZ16(u32 z16, GXZFmt16 zfmt);
 static inline u16 pc_gx_pack_rgb565(const u8* p);
 static void pc_gx_bbox_touch_draw(void);
+static void pc_gx_apply_viewport(void);
+static void pc_gx_apply_scissor(void);
 
 /* --- Global GX State --- */
 PCGXState g_gx;
