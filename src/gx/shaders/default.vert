@@ -91,10 +91,12 @@ void main() {
     vec4 eyePos = mv * vec4(a_position, 1.0);
     gl_Position = u_projection * eyePos;
     /*
-     * GX projection matrices produce clip-space Z in [0,w].
-     * OpenGL expects clip-space Z in [-w,w], so remap with z' = 2z - w.
+     * GX projection matrices produce clip-space Z meant for the GX viewport
+     * transform path. Remap to OpenGL clip-space depth so near/far consume the
+     * full GL depth range instead of the lower half, which improves Z precision
+     * and fixes depth ordering artifacts.
      */
-    gl_Position.z = (2.0 * gl_Position.z) - gl_Position.w;
+    gl_Position.z = (2.0 * gl_Position.z) + gl_Position.w;
     v_eye_pos = eyePos.xyz;
     v_fog_z = -eyePos.z;
     v_color = a_color0;
