@@ -5394,6 +5394,46 @@ static void pc_gx_dl_apply_xf_reg_packet(u32 addr, u32 count, const u32* words) 
     }
 }
 
+static void pc_gx_dl_apply_index_load(u8 cmd, u32 packed) {
+    u32 offset = packed & 0x0FFFu;
+    u32 count = ((packed >> 12) & 0x0Fu) + 1u;
+    u16 mtx_indx = (u16)(packed >> 16);
+
+    switch (cmd) {
+    case GX_LOAD_INDX_A:
+        /* GXLoadPosMtxIndx: offset = id * 4, count = 12. */
+        if (count == 12u && (offset % 4u) == 0u) {
+            u32 id = offset / 4u;
+            GXLoadPosMtxIndx(mtx_indx, id);
+        }
+        break;
+    case GX_LOAD_INDX_B:
+        /* GXLoadNrmMtxIndx3x3: offset = id * 3 + 0x400, count = 9. */
+        if (count == 9u && offset >= 0x400u && ((offset - 0x400u) % 3u) == 0u) {
+            u32 id = (offset - 0x400u) / 3u;
+            GXLoadNrmMtxIndx3x3(mtx_indx, id);
+        }
+        break;
+    case GX_LOAD_INDX_C:
+        /* GXLoadTexMtxIndx: regular or post-transform texture matrix. */
+        if ((count == 8u || count == 12u) && (offset % 4u) == 0u) {
+            u32 id;
+            GXTexMtxType type = (count == 8u) ? GX_MTX2x4 : GX_MTX3x4;
+            if (offset >= 0x500u) {
+                id = GX_PTTEXMTX0 + ((offset - 0x500u) / 4u);
+            } else {
+                id = offset / 4u;
+            }
+            GXLoadTexMtxIndx(mtx_indx, id, type);
+        }
+        break;
+    case GX_LOAD_INDX_D:
+    default:
+        /* Not used by current titles/tests in this backend path yet. */
+        break;
+    }
+}
+
 static u32 pc_gx_bp_decode_ras_chan(u32 ras_chan) {
     switch (ras_chan & 0x7u) {
         case 0: return GX_COLOR0A0;
@@ -5875,6 +5915,10 @@ static void pc_gx_dl_execute_raw_internal(const u8* p, u32 nbytes, PCGXDLDecodeS
             case GX_LOAD_INDX_C:
             case GX_LOAD_INDX_D:
                 if (remaining < 5) return;
+                {
+                    u32 packed = pc_gx_dl_read_be32(p + off + 1);
+                    pc_gx_dl_apply_index_load(cmd, packed);
+                }
                 off += 5;
                 break;
             case GX_CMD_CALL_DL:
