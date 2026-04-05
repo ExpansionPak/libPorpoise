@@ -1750,6 +1750,62 @@ void pc_gx_flush_vertices(void) {
         gl_prim = GL_TRIANGLES;
     }
 
+    /* GXSetZCompLoc(GX_TRUE): depth compare/write occurs before texturing.
+     * To emulate this with shader alpha test (discard), run a depth-only prepass
+     * when alpha compare is active so depth updates are not blocked by discard. */
+    {
+        int alpha_compare_active = !(
+            g_gx.alpha_comp0 == GX_ALWAYS &&
+            g_gx.alpha_comp1 == GX_ALWAYS
+        );
+        int do_z_prepass = (shader != 0) &&
+                           g_gx.z_compare_enable &&
+                           g_gx.z_update_enable &&
+                           g_gx.z_comp_loc_before_tex &&
+                           alpha_compare_active;
+
+        if (do_z_prepass) {
+            GLboolean old_color_mask[4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+            GLboolean old_depth_mask = GL_TRUE;
+            GLboolean old_blend = glIsEnabled(GL_BLEND);
+            GLint loc;
+
+            glGetBooleanv(GL_COLOR_WRITEMASK, old_color_mask);
+            glGetBooleanv(GL_DEPTH_WRITEMASK, &old_depth_mask);
+
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+
+            loc = g_gx.uloc.alpha_comp0; if (loc >= 0) glUniform1i(loc, GX_ALWAYS);
+            loc = g_gx.uloc.alpha_ref0;  if (loc >= 0) glUniform1i(loc, 0);
+            loc = g_gx.uloc.alpha_op;    if (loc >= 0) glUniform1i(loc, GX_AOP_AND);
+            loc = g_gx.uloc.alpha_comp1; if (loc >= 0) glUniform1i(loc, GX_ALWAYS);
+            loc = g_gx.uloc.alpha_ref1;  if (loc >= 0) glUniform1i(loc, 0);
+
+            if (g_gx.current_primitive == GX_QUADS) {
+                int num_quads = count / 4;
+                int num_indices = num_quads * 6;
+                glDrawElements(GL_TRIANGLES, num_indices, GL_UNSIGNED_SHORT, 0);
+                PC_GL_CHECK("glDrawElements(z_prepass)");
+            } else {
+                glDrawArrays(gl_prim, 0, submit_count);
+                PC_GL_CHECK("glDrawArrays(z_prepass)");
+            }
+
+            loc = g_gx.uloc.alpha_comp0; if (loc >= 0) glUniform1i(loc, g_gx.alpha_comp0);
+            loc = g_gx.uloc.alpha_ref0;  if (loc >= 0) glUniform1i(loc, g_gx.alpha_ref0);
+            loc = g_gx.uloc.alpha_op;    if (loc >= 0) glUniform1i(loc, g_gx.alpha_op);
+            loc = g_gx.uloc.alpha_comp1; if (loc >= 0) glUniform1i(loc, g_gx.alpha_comp1);
+            loc = g_gx.uloc.alpha_ref1;  if (loc >= 0) glUniform1i(loc, g_gx.alpha_ref1);
+
+            glDepthMask(old_depth_mask);
+            glColorMask(old_color_mask[0], old_color_mask[1], old_color_mask[2], old_color_mask[3]);
+            if (old_blend) glEnable(GL_BLEND);
+            else glDisable(GL_BLEND);
+        }
+    }
+
     if (g_gx.current_primitive == GX_QUADS) {
         int num_quads = count / 4;
         int num_indices = num_quads * 6;
