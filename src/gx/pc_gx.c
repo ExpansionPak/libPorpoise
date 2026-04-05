@@ -5333,6 +5333,67 @@ static void pc_gx_dl_apply_cp_stream_reg(PCGXDLDecodeState* st, u8 reg8, u32 dat
     }
 }
 
+static float pc_gx_dl_u32_as_f32(u32 bits) {
+    float v;
+    memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+static void pc_gx_dl_apply_xf_reg_packet(u32 addr, u32 count, const u32* words) {
+    if (!words || count == 0) return;
+
+    /* Projection packet from __GXSetProjection: XF 0x1020, 6 floats + type. */
+    if (addr == 0x1020u && count >= 7u) {
+        float pv[7];
+        pv[0] = (words[6] != 0u) ? 1.0f : 0.0f; /* GX_ORTHOGRAPHIC or GX_PERSPECTIVE */
+        for (u32 i = 0; i < 6u; ++i) {
+            pv[i + 1u] = pc_gx_dl_u32_as_f32(words[i]);
+        }
+        GXSetProjectionv(pv);
+        return;
+    }
+
+    /* Position matrix packet: addr = id*4, count = 12 floats. */
+    if (addr < 0x400u && count == 12u && (addr % 12u) == 0u) {
+        float mtx[3][4];
+        u32 id = addr / 4u;
+        for (u32 i = 0; i < 12u; ++i) {
+            ((float*)mtx)[i] = pc_gx_dl_u32_as_f32(words[i]);
+        }
+        GXLoadPosMtxImm(mtx, id);
+        return;
+    }
+
+    /* Normal matrix packet: addr = id*3 + 0x400, count = 9 floats. */
+    if (addr >= 0x400u && addr < 0x500u && count == 9u && ((addr - 0x400u) % 9u) == 0u) {
+        float mtx3x3[3][3];
+        u32 id = (addr - 0x400u) / 3u;
+        for (u32 i = 0; i < 9u; ++i) {
+            ((float*)mtx3x3)[i] = pc_gx_dl_u32_as_f32(words[i]);
+        }
+        GXLoadNrmMtxImm3x3(mtx3x3, id);
+        return;
+    }
+
+    /* Texture matrix packet: regular or post-transform texture matrix ranges. */
+    if ((count == 8u || count == 12u) &&
+        ((addr >= 120u && addr < 0x400u) || (addr >= 0x500u && addr < 0x600u))) {
+        float mtx[3][4];
+        u32 id;
+        memset(mtx, 0, sizeof(mtx));
+        for (u32 i = 0; i < count; ++i) {
+            ((float*)mtx)[i] = pc_gx_dl_u32_as_f32(words[i]);
+        }
+        if (addr >= 0x500u) {
+            id = ((addr - 0x500u) / 4u) + GX_PTTEXMTX0;
+        } else {
+            id = addr / 4u;
+        }
+        GXLoadTexMtxImm(mtx, id, (count == 8u) ? GX_MTX2x4 : GX_MTX3x4);
+        return;
+    }
+}
+
 static u32 pc_gx_bp_decode_ras_chan(u32 ras_chan) {
     switch (ras_chan & 0x7u) {
         case 0: return GX_COLOR0A0;
@@ -5795,8 +5856,17 @@ static void pc_gx_dl_execute_raw_internal(const u8* p, u32 nbytes, PCGXDLDecodeS
                 if (remaining < 5) return;
                 u32 hdr_be = pc_gx_dl_read_be32(p + off + 1);
                 u32 count = ((hdr_be >> 16) & 0x0F) + 1;
+                u32 addr = hdr_be & 0xFFFFu;
                 u32 packet_size = 1 + 4 + count * 4;
                 if (remaining < packet_size) return;
+                {
+                    u32 words[16];
+                    u32 n = (count <= 16u) ? count : 16u;
+                    for (u32 i = 0; i < n; ++i) {
+                        words[i] = pc_gx_dl_read_be32(p + off + 5 + (i * 4));
+                    }
+                    pc_gx_dl_apply_xf_reg_packet(addr, n, words);
+                }
                 off += packet_size;
                 break;
             }
