@@ -1687,11 +1687,12 @@ void pc_gx_flush_vertices(void) {
     }
 
     if (g_gx.dirty & PC_GX_DIRTY_COLOR_MASK) {
+        int depth_only_color_target = (g_gx.pixel_fmt == GX_PF_Z24);
         glColorMask(
-            g_gx.color_update_enable ? GL_TRUE : GL_FALSE,
-            g_gx.color_update_enable ? GL_TRUE : GL_FALSE,
-            g_gx.color_update_enable ? GL_TRUE : GL_FALSE,
-            g_gx.alpha_update_enable ? GL_TRUE : GL_FALSE
+            (g_gx.color_update_enable && !depth_only_color_target) ? GL_TRUE : GL_FALSE,
+            (g_gx.color_update_enable && !depth_only_color_target) ? GL_TRUE : GL_FALSE,
+            (g_gx.color_update_enable && !depth_only_color_target) ? GL_TRUE : GL_FALSE,
+            (g_gx.alpha_update_enable && !depth_only_color_target) ? GL_TRUE : GL_FALSE
         );
         if (g_gx.dither_enable) {
             glEnable(GL_DITHER);
@@ -2656,6 +2657,7 @@ void GXSetFieldMode(GXBool field_mode, GXBool half_aspect) {
 }
 void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt) {
     pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_COLOR_MASK);
     /* Track requested EFB format; backend currently uses a fixed GL render target format. */
     g_gx.pixel_fmt = pix_fmt;
     g_gx.z_fmt = z_fmt;
