@@ -598,6 +598,13 @@ void pc_gx_begin_frame(void) {
     glClearColor(g_gx.clear_color[0], g_gx.clear_color[1], g_gx.clear_color[2], g_gx.clear_color[3]);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    /* Restore GX viewport/scissor after VI present path overwrote GL viewport state.
+     * Viewport/scissor are immediate-state APIs (not part of dirty-upload groups). */
+    if (g_gx.viewport[2] > 0.0f && g_gx.viewport[3] > 0.0f) {
+        pc_gx_apply_viewport();
+    }
+    pc_gx_apply_scissor();
+
     /* VI present path mutates global GL state (depth/blend/cull/masks/viewport/scissor).
      * Force a full GX->GL resync on next draw so stale GL state cannot leak across frames. */
     g_gx.dirty = PC_GX_DIRTY_ALL;
