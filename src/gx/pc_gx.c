@@ -3848,7 +3848,8 @@ static void pc_gx_copy_disp_to_memory(void* dest, const u8* rgba, int read_wd, i
 }
 
 static void pc_gx_clear_copy_src(void) {
-    pc_gx_clear_copy_rect(g_gx.copy_src, GX_TRUE);
+    /* GXSetZMode(update_enable) controls whether copy clears affect Z. */
+    pc_gx_clear_copy_rect(g_gx.copy_src, g_gx.z_update_enable ? GX_TRUE : GX_FALSE);
 }
 
 void GXCopyDisp(void* dest, GXBool clear) {
@@ -4430,8 +4431,8 @@ static void pc_gx_copy_tex_execute(void* dest, GXBool clear) {
 
     free(rgba);
     if (clear) {
-        /* Keep color clear behavior while avoiding depth perturbation during texture copy. */
-        pc_gx_clear_copy_rect(g_gx.tex_copy_src, GX_FALSE);
+        /* GXSetZMode(update_enable) controls whether copy clears affect Z. */
+        pc_gx_clear_copy_rect(g_gx.tex_copy_src, g_gx.z_update_enable ? GX_TRUE : GX_FALSE);
     }
 }
 
