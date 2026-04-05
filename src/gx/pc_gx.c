@@ -597,6 +597,10 @@ void pc_gx_begin_frame(void) {
     glClearDepth(g_gx.clear_depth);
     glClearColor(g_gx.clear_color[0], g_gx.clear_color[1], g_gx.clear_color[2], g_gx.clear_color[3]);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    /* VI present path mutates global GL state (depth/blend/cull/masks/viewport/scissor).
+     * Force a full GX->GL resync on next draw so stale GL state cannot leak across frames. */
+    g_gx.dirty = PC_GX_DIRTY_ALL;
 }
 
 void pc_gx_shutdown(void) {
