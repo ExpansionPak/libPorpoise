@@ -2632,6 +2632,7 @@ void GXSetAlphaUpdate(GXBool enable) {
     g_gx.alpha_update_enable = enable;
 }
 void GXSetZCompLoc(GXBool before_tex) {
+    pc_gx_flush_if_begin_complete();
     /* Compare-before-texture vs compare-after-texture is not fully emulated yet. */
     g_gx.z_comp_loc_before_tex = before_tex ? 1 : 0;
 }
@@ -2654,6 +2655,7 @@ void GXSetFieldMode(GXBool field_mode, GXBool half_aspect) {
     g_gx.field_half_aspect = half_aspect ? 1 : 0;
 }
 void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt) {
+    pc_gx_flush_if_begin_complete();
     /* Track requested EFB format; backend currently uses a fixed GL render target format. */
     g_gx.pixel_fmt = pix_fmt;
     g_gx.z_fmt = z_fmt;
