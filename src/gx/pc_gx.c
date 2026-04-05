@@ -1780,7 +1780,6 @@ void pc_gx_flush_vertices(void) {
             g_gx.alpha_comp1 == GX_ALWAYS
         );
         int do_z_prepass = (shader != 0) &&
-                           g_gx.z_compare_enable &&
                            g_gx.z_update_enable &&
                            g_gx.z_comp_loc_before_tex &&
                            alpha_compare_active;
