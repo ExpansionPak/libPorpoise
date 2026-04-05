@@ -1642,6 +1642,7 @@ void pc_gx_flush_vertices(void) {
     }
 
     if (g_gx.dirty & PC_GX_DIRTY_DEPTH) {
+        GLboolean depth_write_enable = GL_FALSE;
         if (g_gx.z_compare_enable) {
             glEnable(GL_DEPTH_TEST);
             GLenum zfunc;
@@ -1657,10 +1658,13 @@ void pc_gx_flush_vertices(void) {
                 default:         zfunc = GL_LEQUAL; break;
             }
             glDepthFunc(zfunc);
+            depth_write_enable = g_gx.z_update_enable ? GL_TRUE : GL_FALSE;
         } else {
             glDisable(GL_DEPTH_TEST);
+            /* GX docs: when compare is disabled, Z buffer is not updated. */
+            depth_write_enable = GL_FALSE;
         }
-        glDepthMask(g_gx.z_update_enable ? GL_TRUE : GL_FALSE);
+        glDepthMask(depth_write_enable);
     }
 
     if (g_gx.dirty & PC_GX_DIRTY_COLOR_MASK) {
