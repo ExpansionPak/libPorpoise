@@ -27,7 +27,7 @@ static float tpl_be_f32(const void* p) {
 }
 
 static void* tpl_alloc_aligned(size_t size) {
-#ifdef _MSC_VER
+#if defined(_MSC_VER) || defined(_WIN32)
     return _aligned_malloc(size, 32);
 #else
     void* p = NULL;
@@ -38,7 +38,7 @@ static void* tpl_alloc_aligned(size_t size) {
 
 static void tpl_free_aligned(void* p) {
     if (!p) return;
-#ifdef _MSC_VER
+#if defined(_MSC_VER) || defined(_WIN32)
     _aligned_free(p);
 #else
     free(p);

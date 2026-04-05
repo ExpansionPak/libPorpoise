@@ -67,8 +67,12 @@ void CARDInit(void) {
     
     // Initialize card state
     for (int i = 0; i < CARD_MAX_CHAN; i++) {
-        __CARDCards[i].mounted = FALSE;
-        __CARDCards[i].formatted = FALSE;
+        /*
+         * PC port policy: expose an always-present virtual memory card.
+         * This avoids title/menu stalls in games that repeatedly probe/mount card media.
+         */
+        __CARDCards[i].mounted = TRUE;
+        __CARDCards[i].formatted = TRUE;
         __CARDCards[i].lastResult = CARD_RESULT_READY;
         __CARDCards[i].workArea = NULL;
         __CARDCards[i].detachCallback = NULL;
@@ -100,9 +104,12 @@ void CARDInit(void) {
  *---------------------------------------------------------------------------*/
 BOOL CARDProbe(s32 chan) {
     PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, FALSE, "invalid channel");
-    
-    struct stat st;
-    return (stat(__CARDCardPaths[chan], &st) == 0);
+
+    /*
+     * Always report card present on PC. CARDInit already creates backing folders.
+     * If a folder is deleted at runtime, treat it as transient and still report present.
+     */
+    return TRUE;
 }
 
 /*---------------------------------------------------------------------------*

@@ -59,8 +59,17 @@ void GXGetProjectionv(f32* p) {
   }
 }
 
-// TODO GXGetScissor
-// TODO GXGetCullMode
+void GXGetScissor(u32* xOrig, u32* yOrig, u32* wd, u32* ht) {
+  if (xOrig) *xOrig = g_gxState().scissorLeft;
+  if (yOrig) *yOrig = g_gxState().scissorTop;
+  if (wd) *wd = g_gxState().scissorWd;
+  if (ht) *ht = g_gxState().scissorHt;
+}
+
+void GXGetCullMode(GXCullMode* mode) {
+  if (!mode) return;
+  *mode = g_gxState().cullMode;
+}
 
 void GXGetLightAttnA(GXLightObj* light_, float* a0, float* a1, float* a2) {
   auto* light = reinterpret_cast<const GXLightObj_*>(light_);
@@ -79,7 +88,7 @@ void GXGetLightAttnK(GXLightObj* light_, float* k0, float* k1, float* k2) {
 void GXGetLightPos(GXLightObj* light_, float* x, float* y, float* z) {
   auto* light = reinterpret_cast<const GXLightObj_*>(light_);
   *x = light->px;
-  *z = light->py;
+  *y = light->py;
   *z = light->pz;
 }
 
@@ -113,7 +122,24 @@ GXTexWrapMode GXGetTexObjWrapT(GXTexObj* tex_obj) { return reinterpret_cast<cons
 
 GXBool GXGetTexObjMipMap(GXTexObj* tex_obj) { return reinterpret_cast<const GXTexObj_*>(tex_obj)->hasMips; }
 
-// TODO GXGetTexObjAll
+void* GXGetTexObjUserData(GXTexObj* tex_obj) {
+  auto it = g_gxState().texObjUserData.find(tex_obj);
+  if (it == g_gxState().texObjUserData.end()) {
+    return nullptr;
+  }
+  return const_cast<void*>(it->second);
+}
+
+void GXGetTexObjAll(GXTexObj* tex_obj, void** image_ptr, u16* width, u16* height, GXTexFmt* format,
+                    GXTexWrapMode* wrap_s, GXTexWrapMode* wrap_t, GXBool* mipmap) {
+  if (image_ptr) *image_ptr = GXGetTexObjData(tex_obj);
+  if (width) *width = GXGetTexObjWidth(tex_obj);
+  if (height) *height = GXGetTexObjHeight(tex_obj);
+  if (format) *format = GXGetTexObjFmt(tex_obj);
+  if (wrap_s) *wrap_s = GXGetTexObjWrapS(tex_obj);
+  if (wrap_t) *wrap_t = GXGetTexObjWrapT(tex_obj);
+  if (mipmap) *mipmap = GXGetTexObjMipMap(tex_obj);
+}
 // TODO GXGetTexObjMinFilt
 // TODO GXGetTexObjMagFilt
 // TODO GXGetTexObjMinLOD
@@ -124,10 +150,23 @@ GXBool GXGetTexObjMipMap(GXTexObj* tex_obj) { return reinterpret_cast<const GXTe
 // TODO GXGetTexObjMaxAniso
 // TODO GXGetTexObjLODAll
 // TODO GXGetTexObjTlut
-// TODO GXGetTlutObjData
-// TODO GXGetTlutObjFmt
-// TODO GXGetTlutObjNumEntries
-// TODO GXGetTlutObjAll
+void* GXGetTlutObjData(GXTlutObj* tlut_obj) {
+  return const_cast<void*>(reinterpret_cast<const GXTlutObj_*>(tlut_obj)->data);
+}
+
+GXTlutFmt GXGetTlutObjFmt(GXTlutObj* tlut_obj) {
+  return reinterpret_cast<const GXTlutObj_*>(tlut_obj)->fmt;
+}
+
+u16 GXGetTlutObjNumEntries(GXTlutObj* tlut_obj) {
+  return reinterpret_cast<const GXTlutObj_*>(tlut_obj)->numEntries;
+}
+
+void GXGetTlutObjAll(GXTlutObj* tlut_obj, void** lut, GXTlutFmt* fmt, u16* n_entries) {
+  if (lut) *lut = GXGetTlutObjData(tlut_obj);
+  if (fmt) *fmt = GXGetTlutObjFmt(tlut_obj);
+  if (n_entries) *n_entries = GXGetTlutObjNumEntries(tlut_obj);
+}
 // TODO GXGetTexRegionAll
 // TODO GXGetTlutRegionAll
 }

@@ -1110,14 +1110,23 @@ BOOL DVDReadDiskID(DVDCommandBlock* block, DVDDiskID* diskID, DVDCallback callba
   Description:  Get current drive status.
                 
                 On GC/Wii: Returns drive state (cover open, spinning, etc.)
-                On PC: Always returns "disc ready"
+                On PC: Returns END when the mounted root exists.
 
   Arguments:    None
 
-  Returns:      DVD_STATE_COVER_CLOSED (always on PC)
+  Returns:      DVD_STATE_END when ready, DVD_STATE_NO_DISK otherwise
  *---------------------------------------------------------------------------*/
 s32 DVDGetDriveStatus(void) {
-    return s_initialized ? DVD_STATE_COVER_CLOSED : DVD_STATE_NO_DISK;
+    if (!s_initialized) {
+        return DVD_STATE_NO_DISK;
+    }
+
+    struct stat st;
+    if (stat(s_rootPath, &st) == 0 && (st.st_mode & S_IFDIR)) {
+        return DVD_STATE_END;
+    }
+
+    return DVD_STATE_NO_DISK;
 }
 
 /*---------------------------------------------------------------------------*

@@ -8,7 +8,9 @@ extern "C" {
 #endif
 
 void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht);
+void GXGetScissor(u32* xOrig, u32* yOrig, u32* wd, u32* ht);
 void GXSetCullMode(GXCullMode mode);
+void GXGetCullMode(GXCullMode* mode);
 void GXSetCoPlanar(GXBool enable);
 
 #ifdef __cplusplus

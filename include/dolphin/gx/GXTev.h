@@ -17,6 +17,7 @@ void GXSetTevAlphaOp(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale 
                      GXTevRegID out_reg);
 void GXSetTevColor(GXTevRegID id, GXColor color);
 void GXSetTevColorS10(GXTevRegID id, GXColorS10 color);
+void GXSetTevClampMode(GXTevStageID stage, GXTevClampMode mode);
 void GXSetTevKColor(GXTevKColorID id, GXColor color);
 void GXSetTevKColorSel(GXTevStageID stage, GXTevKColorSel sel);
 void GXSetTevKAlphaSel(GXTevStageID stage, GXTevKAlphaSel sel);

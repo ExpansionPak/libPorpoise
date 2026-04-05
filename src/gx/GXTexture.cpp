@@ -5,6 +5,39 @@
 #include <unordered_map>
 
 namespace {
+GXTexRegion* default_tex_region(GXTexObj* obj, GXTexMapID id) {
+  static GXTexRegion s_regions[GX_MAX_TEXMAP];
+  (void)obj;
+  return &s_regions[id % GX_MAX_TEXMAP];
+}
+
+GXTlutRegion* default_tlut_region(u32 tlutName) {
+  static GXTlutRegion s_regions[GX_BIGTLUT3 + 1];
+  return &s_regions[tlutName % (GX_BIGTLUT3 + 1)];
+}
+
+GXTexRegionCallback g_texRegionCallback = default_tex_region;
+GXTlutRegionCallback g_tlutRegionCallback = default_tlut_region;
+
+inline bool is_ci_tex_format(u32 fmt) {
+  return fmt == GX_TF_C4 || fmt == GX_TF_C8 || fmt == GX_TF_C14X2;
+}
+
+inline void ensure_tex_uploaded(GXTexObj_* obj) {
+  if (!obj->ref) {
+    char name[64];
+    snprintf(name, sizeof(name), "GXLoadTexObj_%u", obj->fmt);
+    obj->ref =
+        porpoise::gfx::new_dynamic_texture_2d(obj->width, obj->height, u32(obj->maxLod) + 1, obj->fmt, name);
+  }
+  if (obj->dataInvalidated) {
+    u32 dataSize = obj->width * obj->height * 4;  // TODO: Calculate based on format
+    std::string_view data(static_cast<const char*>(obj->data), dataSize);
+    porpoise::gfx::write_texture(*obj->ref, data);
+    obj->dataInvalidated = false;
+  }
+}
+
 inline void notify_texture_state() {
 }
 } // namespace
@@ -38,6 +71,7 @@ void GXInitTexObj(GXTexObj* obj_, const void* data, u16 width, u16 height, u32 f
   } else {
     obj->dataInvalidated = true;
   }
+  g_gxState().texObjUserData[obj_] = nullptr;
   notify_texture_state();
 }
 
@@ -69,6 +103,7 @@ void GXInitTexObjCI(GXTexObj* obj_, const void* data, u16 width, u16 height, GXC
   } else {
     obj->dataInvalidated = true;
   }
+  g_gxState().texObjUserData[obj_] = nullptr;
   notify_texture_state();
 }
 
@@ -99,6 +134,10 @@ void GXInitTexObjData(GXTexObj* obj_, const void* data) {
   notify_texture_state();
 }
 
+void GXInitTexObjUserData(GXTexObj* obj_, const void* userData) {
+  g_gxState().texObjUserData[obj_] = userData;
+}
+
 void GXInitTexObjWrapMode(GXTexObj* obj_, GXTexWrapMode wrapS, GXTexWrapMode wrapT) {
   auto* obj = reinterpret_cast<GXTexObj_*>(obj_);
   obj->wrapS = wrapS;
@@ -119,24 +158,16 @@ void GXInitTexObjTlut(GXTexObj* obj_, u32 tlut) {
 // TODO GXInitTexObjBiasClamp
 // TODO GXInitTexObjEdgeLOD
 // TODO GXInitTexObjMaxAniso
-// TODO GXInitTexObjUserData
-// TODO GXGetTexObjUserData
 
 void GXLoadTexObj(GXTexObj* obj_, GXTexMapID id) {
   auto* obj = reinterpret_cast<GXTexObj_*>(obj_);
-  if (!obj->ref) {
-    char name[64];
-    snprintf(name, sizeof(name), "GXLoadTexObj_%u", obj->fmt);
-    obj->ref =
-        porpoise::gfx::new_dynamic_texture_2d(obj->width, obj->height, u32(obj->maxLod) + 1, obj->fmt, name);
+  if (g_texRegionCallback) {
+    (void)g_texRegionCallback(obj_, id);
   }
-  if (obj->dataInvalidated) {
-    // Calculate data size - simplified for now
-    u32 dataSize = obj->width * obj->height * 4;  // TODO: Calculate based on format
-    std::string_view data(static_cast<const char*>(obj->data), dataSize);
-    porpoise::gfx::write_texture(*obj->ref, data);
-    obj->dataInvalidated = false;
+  if (is_ci_tex_format(obj->fmt) && g_tlutRegionCallback) {
+    (void)g_tlutRegionCallback(static_cast<u32>(obj->tlut));
   }
+  ensure_tex_uploaded(obj);
   g_gxState().textures[id] = {obj->ref};
   g_gxState().stateDirty = true; // TODO only if changed?
   notify_texture_state();
@@ -240,19 +271,64 @@ void GXLoadTlut(const GXTlutObj* obj_, GXTlut idx) {
   notify_texture_state();
 }
 
-// TODO GXInitTexCacheRegion
-// TODO GXInitTexPreLoadRegion
-// TODO GXInitTlutRegion
-// TODO GXInvalidateTexRegion
+void GXInitTexCacheRegion(GXTexRegion* region, GXBool is32bMipmap, u32 tmemEven, GXTexCacheSize sizeEven,
+                          u32 tmemOdd, GXTexCacheSize sizeOdd) {
+  memset(region, 0, sizeof(*region));
+  region->data[0] = static_cast<u32>(is32bMipmap);
+  region->data[1] = tmemEven;
+  region->data[2] = static_cast<u32>(sizeEven);
+  region->data[3] = tmemOdd;
+  region->data[4] = static_cast<u32>(sizeOdd);
+}
+
+void GXInitTexPreLoadRegion(GXTexRegion* region, u32 tmemEven, u32 sizeEven, u32 tmemOdd, u32 sizeOdd) {
+  memset(region, 0, sizeof(*region));
+  region->data[0] = tmemEven;
+  region->data[1] = sizeEven;
+  region->data[2] = tmemOdd;
+  region->data[3] = sizeOdd;
+}
+
+void GXInitTlutRegion(GXTlutRegion* region, u32 tmemAddr, u32 tlutSize) {
+  memset(region, 0, sizeof(*region));
+  region->data[0] = tmemAddr;
+  region->data[1] = tlutSize;
+}
+
+void GXInvalidateTexRegion(const GXTexRegion* region) {
+  (void)region;
+}
 
 void GXInvalidateTexAll() {
   // no-op?
 }
 
-// TODO GXPreLoadEntireTexture
-// TODO GXSetTexRegionCallback
-// TODO GXSetTlutRegionCallback
-// TODO GXLoadTexObjPreLoaded
+GXTexRegionCallback GXSetTexRegionCallback(GXTexRegionCallback callback) {
+  auto prev = g_texRegionCallback;
+  g_texRegionCallback = callback ? callback : default_tex_region;
+  return prev;
+}
+
+GXTlutRegionCallback GXSetTlutRegionCallBack(GXTlutRegionCallback callback) {
+  auto prev = g_tlutRegionCallback;
+  g_tlutRegionCallback = callback ? callback : default_tlut_region;
+  return prev;
+}
+
+void GXPreLoadEntireTexture(GXTexObj* texObj, GXTexRegion* region) {
+  (void)region;
+  if (!texObj) return;
+  ensure_tex_uploaded(reinterpret_cast<GXTexObj_*>(texObj));
+}
+
+void GXLoadTexObjPreLoaded(GXTexObj* obj_, GXTexRegion* region, GXTexMapID id) {
+  (void)region;
+  auto* obj = reinterpret_cast<GXTexObj_*>(obj_);
+  ensure_tex_uploaded(obj);
+  g_gxState().textures[id] = {obj->ref};
+  g_gxState().stateDirty = true;
+}
+
 void GXSetTexCoordScaleManually(GXTexCoordID coord, GXBool enable, u16 ss, u16 ts) {
   // TODO
 }

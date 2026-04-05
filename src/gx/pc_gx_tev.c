@@ -42,6 +42,8 @@ static char* load_shader(const char* filename) {
     snprintf(abs_source_path, sizeof(abs_source_path), "%s/%s", PORPOISE_GX_SHADER_DIR, filename);
 #elif defined(PORPOISE_ACPC_SHADER_DIR)
     snprintf(abs_source_path, sizeof(abs_source_path), "%s/%s", PORPOISE_ACPC_SHADER_DIR, filename);
+#endif
+#if defined(PORPOISE_GX_SHADER_DIR) || defined(PORPOISE_ACPC_SHADER_DIR)
     tried[tried_count++] = abs_source_path;
 #endif
 
@@ -101,6 +103,10 @@ static GLuint link_program(GLuint vert, GLuint frag) {
     glBindAttribLocation(prog, 5, "a_texcoord1");
     glBindAttribLocation(prog, 6, "a_texcoord2");
     glBindAttribLocation(prog, 7, "a_texcoord3");
+    glBindAttribLocation(prog, 8, "a_texcoord4");
+    glBindAttribLocation(prog, 9, "a_texcoord5");
+    glBindAttribLocation(prog, 10, "a_texcoord6");
+    glBindAttribLocation(prog, 11, "a_texcoord7");
 
     glLinkProgram(prog);
 

@@ -29,6 +29,16 @@ u16 s_dispCopyLeft = 0;
 u16 s_dispCopyTop = 0;
 u16 s_dispCopyWidth = 0;
 u16 s_dispCopyHeight = 0;
+u16 s_dispCopyDstWidth = 0;
+u16 s_dispCopyDstHeight = 0;
+GXCopyMode s_dispCopyMode = GX_COPY_PROGRESSIVE;
+GXGamma s_dispCopyGamma = GX_GM_1_0;
+GXFBClamp s_copyClamp = static_cast<GXFBClamp>(GX_CLAMP_TOP | GX_CLAMP_BOTTOM);
+u16 s_bboxLeft = 0;
+u16 s_bboxTop = 0;
+u16 s_bboxRight = 0;
+u16 s_bboxBottom = 0;
+bool s_bboxValid = false;
 
 u32 __GXGetNumXfbLines(u32 efbHeight, u32 yScaleReg) {
   if (yScaleReg == 0) {
@@ -81,11 +91,29 @@ GXRenderModeObj GXMpal480IntDf = {
 
 
 void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor, u16 ver) {
-  *rmout = *rmin;
-  const auto size = porpoise::window::get_window_size();
-  rmout->fbWidth = size.fb_width;
-  rmout->efbHeight = size.fb_height;
-  rmout->xfbHeight = size.fb_height;
+  if (!rmin || !rmout) {
+    return;
+  }
+  if (rmin != rmout) {
+    *rmout = *rmin;
+  }
+
+  const u16 hor2 = static_cast<u16>(hor * 2);
+  const u16 ver2 = static_cast<u16>(ver * 2);
+  const u32 verf = (static_cast<u32>(ver2) * static_cast<u32>(rmin->efbHeight)) /
+                   static_cast<u32>(rmin->xfbHeight == 0 ? 1 : rmin->xfbHeight);
+
+  rmout->fbWidth = static_cast<u16>(rmin->fbWidth - hor2);
+  rmout->efbHeight = static_cast<u16>(rmin->efbHeight - verf);
+  if (rmin->xFBmode == VI_XFBMODE_SF && (rmin->viTVmode & 2) != 2) {
+    rmout->xfbHeight = static_cast<u16>(rmin->xfbHeight - ver);
+  } else {
+    rmout->xfbHeight = static_cast<u16>(rmin->xfbHeight - ver2);
+  }
+  rmout->viWidth = static_cast<u16>(rmin->viWidth - hor2);
+  rmout->viHeight = static_cast<u16>(rmin->viHeight - ver2);
+  rmout->viXOrigin = static_cast<u16>(rmin->viXOrigin + hor);
+  rmout->viYOrigin = static_cast<u16>(rmin->viYOrigin + ver);
 }
 
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
@@ -97,17 +125,23 @@ void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
 
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) { g_gxState().texCopySrc = {left, top, wd, ht}; }
 
-void GXSetDispCopyDst(u16 wd, u16 ht) {}
+void GXSetDispCopyDst(u16 wd, u16 ht) {
+  s_dispCopyDstWidth = wd;
+  s_dispCopyDstHeight = ht;
+}
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
   // TODO texture copy scaling (mipmap)
+  (void)wd;
+  (void)ht;
+  (void)mipmap;
   g_gxState().texCopyFmt = fmt;
 }
 
-// TODO GXSetDispCopyFrame2Field
+void GXSetDispCopyFrame2Field(GXCopyMode mode) { s_dispCopyMode = mode; }
 
 void GXSetCopyClamp(GXFBClamp clamp) {
-  (void)clamp;
+  s_copyClamp = clamp;
 }
 
 u32 GXSetDispCopyYScale(f32 vscale) {
@@ -120,9 +154,14 @@ u32 GXSetDispCopyYScale(f32 vscale) {
 
 void GXSetCopyClear(GXColor color, u32 depth) { update_gx_state(g_gxState().clearColor, from_gx_color(color)); }
 
-void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {}
+void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
+  (void)aa;
+  (void)sample_pattern;
+  (void)vf;
+  (void)vfilter;
+}
 
-void GXSetDispCopyGamma(GXGamma gamma) {}
+void GXSetDispCopyGamma(GXGamma gamma) { s_dispCopyGamma = gamma; }
 
 // Convert RGBA8 to RGB565
 static inline u16 rgba8_to_rgb565(u8 r, u8 g, u8 b) {
@@ -148,6 +187,12 @@ void GXCopyDisp(void* dest, GXBool clear) {
         height = windowSize.fb_height;
         left = 0;
         top = 0;
+    }
+    if (s_dispCopyDstWidth != 0) {
+      width = s_dispCopyDstWidth;
+    }
+    if (s_dispCopyDstHeight != 0) {
+      height = s_dispCopyDstHeight;
     }
 
     {
@@ -180,6 +225,12 @@ void GXCopyDisp(void* dest, GXBool clear) {
     // the existing buffer, and we need the full composite when we swap. Clearing would wipe
     // the top half. Skip clear for now so full-frame AA shows correctly.
     (void)clear;
+
+    s_bboxLeft = left;
+    s_bboxTop = top;
+    s_bboxRight = static_cast<u16>(left + width - 1);
+    s_bboxBottom = static_cast<u16>(top + height - 1);
+    s_bboxValid = true;
 }
 
 void GXCopyTex(void* dest, GXBool clear) {
@@ -240,6 +291,27 @@ u16 GXGetNumXfbLines(u16 efbHeight, f32 yScale) {
   const u32 reg = packYScaleRegister(yScale);
   return static_cast<u16>(__GXGetNumXfbLines(efbHeight, reg));
 }
-// TODO GXClearBoundingBox
-// TODO GXReadBoundingBox
+
+void GXClearBoundingBox(void) {
+  s_bboxLeft = 0;
+  s_bboxTop = 0;
+  s_bboxRight = 0;
+  s_bboxBottom = 0;
+  s_bboxValid = false;
+}
+
+void GXReadBoundingBox(u16* left, u16* top, u16* right, u16* bottom) {
+  if (!s_bboxValid) {
+    if (left) *left = 0;
+    if (top) *top = 0;
+    if (right) *right = 0;
+    if (bottom) *bottom = 0;
+    return;
+  }
+
+  if (left) *left = s_bboxLeft;
+  if (top) *top = s_bboxTop;
+  if (right) *right = s_bboxRight;
+  if (bottom) *bottom = s_bboxBottom;
+}
 }

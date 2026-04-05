@@ -45,7 +45,8 @@ extern "C" {
 #define PC_GX_MAX_ATTRIB_SIZE 64
 #define PC_GX_MAX_ATTR        26
 #define PC_GX_MAX_VTXFMT      8
-#define PC_GX_MAX_TEV_STAGES  4
+#define PC_GX_MAX_TEV_STAGES  16
+#define PC_GX_MAX_TEXGENS     8
 
 typedef struct {
     int has_position;
@@ -267,10 +268,12 @@ typedef struct {
         GLint light_mask, light_pos[8], light_dir[8], light_color[8];
         GLint light_cos_att[8], light_dist_att[8];
         GLint light_mask1;
-        GLint texmtx_enable[4], texmtx_row0[4], texmtx_row1[4], texgen_src[4], texgen_type[4], texgen_normalize[4];
+        GLint texmtx_enable[PC_GX_MAX_TEXGENS], texmtx_row0[PC_GX_MAX_TEXGENS], texmtx_row1[PC_GX_MAX_TEXGENS];
+        GLint texgen_src[PC_GX_MAX_TEXGENS], texgen_type[PC_GX_MAX_TEXGENS], texgen_normalize[PC_GX_MAX_TEXGENS];
         GLint use_texture[PC_GX_MAX_TEV_STAGES];
         GLint texture[PC_GX_MAX_TEV_STAGES];
         GLint tev_tc_src[PC_GX_MAX_TEV_STAGES];
+        GLint tev_tex_map[PC_GX_MAX_TEV_STAGES];
         GLint num_ind_stages;
         GLint ind_tex[4], ind_scale[4];
         GLint ind_mtx_r0[PC_GX_MAX_TEV_STAGES], ind_mtx_r1[PC_GX_MAX_TEV_STAGES];

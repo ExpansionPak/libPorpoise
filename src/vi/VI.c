@@ -69,6 +69,27 @@ static void* s_nextFB = NULL;            // Next frame buffer
 static void* s_nextRightFB = NULL;       // Right eye FB (for 3D)
 static BOOL s_3dMode = FALSE;            // 3D mode enabled
 
+// Shadow/pending state. Per SDK docs, VI changes are latched by VIFlush and
+// applied from the next field.
+static BOOL s_pendingBlack = TRUE;
+static BOOL s_pendingBlackDirty = FALSE;
+static void* s_pendingNextFB = NULL;
+static BOOL s_pendingNextFBDirty = FALSE;
+static int s_pendingXfbWidth = 640;
+static int s_pendingXfbHeight = 480;
+static VITVMode s_pendingTvMode = VI_TVMODE_NTSC_INT;
+static u32 s_pendingTvFormat = VI_NTSC;
+static u32 s_pendingScanMode = VI_INTERLACE;
+static BOOL s_pendingModeDirty = FALSE;
+static struct {
+    u16 xOrg;
+    u16 yOrg;
+    u16 width;
+    u16 height;
+} s_pendingPan = {0, 0, 640, 480};
+static BOOL s_pendingPanDirty = FALSE;
+static BOOL s_flushPending = FALSE;
+
 // SDL2 Window and OpenGL context
 static SDL_Window* s_window = NULL;
 static SDL_GLContext s_glContext = NULL;
@@ -175,6 +196,32 @@ static void ProcessWindowEvents(void) {
 static void RetraceEmulator(OSAlarm* alarm, OSContext* context) {
     (void)alarm;
     (void)context;
+
+    if (s_flushPending) {
+        if (s_pendingModeDirty) {
+            s_tvMode = s_pendingTvMode;
+            s_tvFormat = s_pendingTvFormat;
+            s_scanMode = s_pendingScanMode;
+            s_xfbWidth = s_pendingXfbWidth;
+            s_xfbHeight = s_pendingXfbHeight;
+            s_pendingModeDirty = FALSE;
+        }
+
+        // Pan settings are tracked for API compatibility but not used by the
+        // PC presenter yet.
+        s_pendingPanDirty = FALSE;
+
+        if (s_pendingBlackDirty) {
+            s_black = s_pendingBlack;
+            s_pendingBlackDirty = FALSE;
+        }
+        if (s_pendingNextFBDirty) {
+            s_nextFB = s_pendingNextFB;
+            s_pendingNextFBDirty = FALSE;
+        }
+
+        s_flushPending = FALSE;
+    }
     
     // Toggle field for interlaced mode (like PPCArthur)
     s_field ^= 1;
@@ -393,11 +440,28 @@ void VIInit(void) {
     s_nextRightFB = NULL;
     s_3dMode = FALSE;
     s_retraceCount = 0;
-    s_tvMode = VI_TVMODE_NTSC_INT;
-    s_tvFormat = VI_NTSC;
-    s_scanMode = VI_INTERLACE;
+    // Preserve mode selected by __VIInit (if used) and derive format fields.
+    s_tvFormat = ((u32)s_tvMode >> 2) & 0xF;
+    s_scanMode = ((u32)s_tvMode) & 0x3;
     s_preRetraceCallback = NULL;
     s_postRetraceCallback = NULL;
+
+    s_pendingBlack = s_black;
+    s_pendingBlackDirty = FALSE;
+    s_pendingNextFB = s_nextFB;
+    s_pendingNextFBDirty = FALSE;
+    s_pendingXfbWidth = s_xfbWidth;
+    s_pendingXfbHeight = s_xfbHeight;
+    s_pendingTvMode = s_tvMode;
+    s_pendingTvFormat = s_tvFormat;
+    s_pendingScanMode = s_scanMode;
+    s_pendingModeDirty = FALSE;
+    s_pendingPan.xOrg = 0;
+    s_pendingPan.yOrg = 0;
+    s_pendingPan.width = (u16)s_xfbWidth;
+    s_pendingPan.height = (u16)s_xfbHeight;
+    s_pendingPanDirty = FALSE;
+    s_flushPending = FALSE;
     
     // Initialize VI register state (like PPCArthur)
     memset(&s_viRegs, 0, sizeof(s_viRegs));
@@ -476,9 +540,13 @@ void VIFlush(void) {
     PP_GUARD_VOID(s_initialized, "VIInit must be called first");
     PP_GUARD_VOID(s_window != NULL, "window not initialized");
     ProcessWindowEvents();
-    
-    // Don't swap here - swap is handled by DEMOSwapBuffers() after rendering
-    // This prevents double-swapping which causes flashing
+
+    // Match SDK semantics: VI state changes are latched by VIFlush and become
+    // visible from a subsequent field boundary.
+    s_flushPending = TRUE;
+
+    // Don't swap here - swap is handled by DEMOSwapBuffers() after rendering.
+    // This prevents double-swapping which causes flashing.
 }
 
 /*---------------------------------------------------------------------------*
@@ -491,7 +559,8 @@ void VIFlush(void) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void VISetNextFrameBuffer(void* fb) {
-    s_nextFB = fb;
+    s_pendingNextFB = fb;
+    s_pendingNextFBDirty = TRUE;
 }
 
 /*---------------------------------------------------------------------------*
@@ -504,6 +573,9 @@ void VISetNextFrameBuffer(void* fb) {
   Returns:      Pointer to next frame buffer
  *---------------------------------------------------------------------------*/
 void* VIGetNextFrameBuffer(void) {
+    if (s_pendingNextFBDirty) {
+        return s_pendingNextFB;
+    }
     return s_nextFB;
 }
 
@@ -546,7 +618,8 @@ void VISetNextRightFrameBuffer(void* fb) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void VISetBlack(BOOL black) {
-    s_black = black;
+    s_pendingBlack = black;
+    s_pendingBlackDirty = TRUE;
 }
 
 /*---------------------------------------------------------------------------*
@@ -578,11 +651,23 @@ void VIConfigure(const GXRenderModeObj* rm) {
     PP_GUARD_VOID(rm != NULL, "null pointer");
 
     if (rm->fbWidth > 0) {
-        s_xfbWidth = (int)VIPadFrameBufferWidth(rm->fbWidth);
+        s_pendingXfbWidth = (int)VIPadFrameBufferWidth(rm->fbWidth);
     }
     if (rm->xfbHeight > 0) {
-        s_xfbHeight = (int)rm->xfbHeight;
+        s_pendingXfbHeight = (int)rm->xfbHeight;
     }
+    s_pendingTvMode = (VITVMode)rm->viTVmode;
+    s_pendingTvFormat = ((u32)rm->viTVmode >> 2) & 0xF;
+    s_pendingScanMode = ((u32)rm->viTVmode) & 0x3;
+    s_pendingModeDirty = TRUE;
+
+    // VIConfigure resets pan defaults to mode values; callers can override
+    // again with VIConfigurePan before VIFlush.
+    s_pendingPan.xOrg = rm->viXOrigin;
+    s_pendingPan.yOrg = rm->viYOrigin;
+    s_pendingPan.width = rm->viWidth;
+    s_pendingPan.height = rm->viHeight;
+    s_pendingPanDirty = TRUE;
 }
 
 /*---------------------------------------------------------------------------*
@@ -598,12 +683,11 @@ void VIConfigure(const GXRenderModeObj* rm) {
   Returns:      None
  *---------------------------------------------------------------------------*/
 void VIConfigurePan(u16 xOrg, u16 yOrg, u16 width, u16 height) {
-    (void)xOrg;
-    (void)yOrg;
-    (void)width;
-    (void)height;
-    
-    /* Panning not implemented on PC. */
+    s_pendingPan.xOrg = xOrg;
+    s_pendingPan.yOrg = yOrg;
+    s_pendingPan.width = width;
+    s_pendingPan.height = height;
+    s_pendingPanDirty = TRUE;
 }
 
 /*---------------------------------------------------------------------------*

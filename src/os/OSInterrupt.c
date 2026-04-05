@@ -478,11 +478,7 @@ OSInterruptMask __OSUnmaskInterrupts(OSInterruptMask mask) {
   Returns:      TRUE if interrupts were enabled, FALSE otherwise
  *---------------------------------------------------------------------------*/
 BOOL OSDisableInterrupts(void) {
-    EnsureInterruptLockInitialized();
-
-    /* Serialize GC-style critical sections across host threads. */
     BOOL wasEnabled = (s_tlsInterruptDisableDepth == 0);
-    InterruptLockEnter();
     s_tlsInterruptDisableDepth++;
     s_interruptsEnabled = FALSE;
     return wasEnabled;
@@ -507,13 +503,8 @@ BOOL OSDisableInterrupts(void) {
   Returns:      TRUE if interrupts were enabled, FALSE otherwise
  *---------------------------------------------------------------------------*/
 BOOL OSEnableInterrupts(void) {
-    EnsureInterruptLockInitialized();
-
     BOOL wasEnabled = (s_tlsInterruptDisableDepth == 0);
-    while (s_tlsInterruptDisableDepth > 0) {
-        InterruptLockLeave();
-        s_tlsInterruptDisableDepth--;
-    }
+    s_tlsInterruptDisableDepth = 0;
     s_interruptsEnabled = TRUE;
     return wasEnabled;
 }
@@ -542,23 +533,16 @@ BOOL OSEnableInterrupts(void) {
   Returns:      Previous state (before this call)
  *---------------------------------------------------------------------------*/
 BOOL OSRestoreInterrupts(BOOL level) {
-    EnsureInterruptLockInitialized();
-
     BOOL prev = (s_tlsInterruptDisableDepth == 0);
 
     /* Unwind one disable level for this restore call. */
     if (s_tlsInterruptDisableDepth > 0) {
-        InterruptLockLeave();
         s_tlsInterruptDisableDepth--;
     }
 
     if (level) {
-        while (s_tlsInterruptDisableDepth > 0) {
-            InterruptLockLeave();
-            s_tlsInterruptDisableDepth--;
-        }
+        s_tlsInterruptDisableDepth = 0;
     } else if (s_tlsInterruptDisableDepth == 0) {
-        InterruptLockEnter();
         s_tlsInterruptDisableDepth = 1;
     }
 
@@ -570,24 +554,14 @@ BOOL OSRestoreInterrupts(BOOL level) {
   Internal helpers used by OSSleepThread/OSWakeupThread implementation.
  *---------------------------------------------------------------------------*/
 u32 __OSSuspendInterruptLockForSleep(void) {
-    EnsureInterruptLockInitialized();
-
     u32 released = s_tlsInterruptDisableDepth;
-    while (s_tlsInterruptDisableDepth > 0) {
-        InterruptLockLeave();
-        s_tlsInterruptDisableDepth--;
-    }
+    s_tlsInterruptDisableDepth = 0;
     s_interruptsEnabled = TRUE;
     return released;
 }
 
 void __OSResumeInterruptLockAfterSleep(u32 depth) {
-    EnsureInterruptLockInitialized();
-
-    while (depth-- > 0) {
-        InterruptLockEnter();
-        s_tlsInterruptDisableDepth++;
-    }
+    s_tlsInterruptDisableDepth += depth;
     s_interruptsEnabled = (s_tlsInterruptDisableDepth == 0) ? TRUE : FALSE;
 }
 

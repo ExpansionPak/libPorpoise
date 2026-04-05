@@ -19,8 +19,18 @@ void GXSetZCompLoc(GXBool before_tex);
 void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt);
 void GXSetDither(GXBool dither);
 void GXSetDstAlpha(GXBool enable, u8 alpha);
-// ? GXSetFieldMask();
-// ? GXSetFieldMode();
+void GXSetFieldMask(GXBool odd_mask, GXBool even_mask);
+void GXSetFieldMode(GXBool field_mode, GXBool half_aspect_ratio);
+
+void GXPokeAlphaMode(GXCompare func, u8 threshold);
+void GXPokeAlphaRead(GXAlphaReadMode mode);
+void GXPokeAlphaUpdate(GXBool update_enable);
+void GXPokeBlendMode(GXBlendMode type, GXBlendFactor src_factor, GXBlendFactor dst_factor, GXLogicOp op);
+void GXPokeColorUpdate(GXBool update_enable);
+void GXPokeDstAlpha(GXBool enable, u8 alpha);
+void GXPokeDither(GXBool dither);
+void GXPokeARGB(u16 x, u16 y, u32 color);
+void GXPeekARGB(u16 x, u16 y, u32* color);
 
 #ifdef __cplusplus
 }

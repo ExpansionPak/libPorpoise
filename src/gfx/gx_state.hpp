@@ -188,6 +188,7 @@ struct TevStage {
   TevPassAlpha alphaPass{};
   TevOp colorOp{};
   TevOp alphaOp{};
+  GXTevClampMode clampMode = GX_TC_LINEAR;
   GXTevKColorSel kcSel = GX_TEV_KCSEL_1;
   GXTevKAlphaSel kaSel = GX_TEV_KASEL_1;
   GXTexCoordID texCoordId = GX_TEXCOORD_NULL;
@@ -229,6 +230,7 @@ struct GXState {
   std::array<TevStage, GX_MAX_TEVSTAGE> tevStages{};
   std::array<TextureBind, GX_MAX_TEXMAP> textures{};
   std::array<GXTlutObj_, 20> tluts{};
+  std::unordered_map<const GXTexObj*, const void*> texObjUserData{};
   std::array<TexMtxVariant, 10> texMtxs{};
   std::array<porpoise::Mat3x4<float>, 20> ptTexMtxs{};
   std::array<TcgConfig, GX_MAX_TEXCOORD> tcgs{};
@@ -276,4 +278,3 @@ using porpoise::gfx::gx::GXLightObj_;
 using porpoise::gfx::gx::VtxAttrFmt;
 using porpoise::gfx::gx::Light;
 }
-

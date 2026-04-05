@@ -211,12 +211,11 @@ BOOL OSSendMessage(OSMessageQueue* mq, OSMessage msg, s32 flags) {
             return FALSE;
         }
         
-        /* Blocking mode: wait for space to become available */
-        /* Note: OSSleepThread will restore interrupts internally */
+        /* Blocking mode: wait for space to become available.
+         * OSSleepThread returns with interrupt state restored to this
+         * critical section, so do not disable interrupts again here.
+         */
         OSSleepThread(&mq->queueSend);
-        
-        /* When we wake up, re-disable interrupts to check again */
-        enabled = OSDisableInterrupts();
     }
     
     /* Insert message at tail of circular buffer */
@@ -283,9 +282,10 @@ BOOL OSJamMessage(OSMessageQueue* mq, OSMessage msg, s32 flags) {
             return FALSE;
         }
         
-        /* Blocking mode: wait for space */
+        /* Blocking mode: wait for space.
+         * OSSleepThread restores interrupt state for this critical section.
+         */
         OSSleepThread(&mq->queueSend);
-        enabled = OSDisableInterrupts();
     }
     
     /* Insert message at HEAD by moving firstIndex backward */
@@ -361,9 +361,10 @@ BOOL OSReceiveMessage(OSMessageQueue* mq, OSMessage* msg, s32 flags) {
             return FALSE;
         }
         
-        /* Blocking mode: wait for message to arrive */
+        /* Blocking mode: wait for message to arrive.
+         * OSSleepThread restores interrupt state for this critical section.
+         */
         OSSleepThread(&mq->queueReceive);
-        enabled = OSDisableInterrupts();
     }
     
     /* Copy message from head of queue */

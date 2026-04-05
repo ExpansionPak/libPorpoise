@@ -126,7 +126,7 @@ void VIWaitForRetrace(void);
  * @brief Flush VI configuration to hardware
  * 
  * On GC/Wii: Writes shadow registers to VI hardware
- * On PC: No-op stub
+ * On PC: Latches pending VI state to apply on the next simulated retrace
  */
 void VIFlush(void);
 

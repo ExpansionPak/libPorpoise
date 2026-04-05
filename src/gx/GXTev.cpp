@@ -50,13 +50,13 @@ void GXSetTevAlphaIn(GXTevStageID stageId, GXTevAlphaArg a, GXTevAlphaArg b, GXT
   notify_tev_state();
 }
 
-void GXSetTevColorOp(GXTevStageID stageId, GXTevOp op, GXTevBias bias, GXTevScale scale, bool clamp,
+void GXSetTevColorOp(GXTevStageID stageId, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp,
                      GXTevRegID outReg) {
   update_gx_state(g_gxState().tevStages[stageId].colorOp, {op, bias, scale, outReg, clamp});
   notify_tev_state();
 }
 
-void GXSetTevAlphaOp(GXTevStageID stageId, GXTevOp op, GXTevBias bias, GXTevScale scale, bool clamp,
+void GXSetTevAlphaOp(GXTevStageID stageId, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp,
                      GXTevRegID outReg) {
   update_gx_state(g_gxState().tevStages[stageId].alphaOp, {op, bias, scale, outReg, clamp});
   notify_tev_state();
@@ -75,6 +75,12 @@ void GXSetTevColorS10(GXTevRegID id, GXColorS10 color) {
                                                static_cast<float>(color.b) / 255.f,
                                                static_cast<float>(color.a) / 255.f,
                                            });
+  notify_tev_state();
+}
+
+void GXSetTevClampMode(GXTevStageID id, GXTevClampMode mode) {
+  // HW1-only API: on HW2 this is effectively always linear. We track mode for compatibility.
+  update_gx_state(g_gxState().tevStages[id].clampMode, mode);
   notify_tev_state();
 }
 

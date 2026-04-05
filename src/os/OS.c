@@ -26,6 +26,9 @@ static BOOL s_osReportInitialized = FALSE;
 static OS_THREAD_LOCAL BOOL s_osReportInProgress = FALSE;
 #ifdef _WIN32
 static BOOL s_consoleAttached = FALSE;
+/* Optional OSReport file sink enabled via PORPOISE_OSREPORT_FILE env var. */
+static int s_osReportFileMode = -1; /* -1 unknown, 0 disabled, 1 enabled */
+static char s_osReportFilePath[1024] = {0};
 
 static void EnsureConsole(void) {
     if (s_consoleAttached) {
@@ -47,6 +50,40 @@ static void EnsureConsole(void) {
     }
 
     s_consoleAttached = TRUE;
+}
+
+static void WriteOSReportToFile(const char* text, size_t len) {
+    if (!text || len == 0) {
+        return;
+    }
+
+    if (s_osReportFileMode < 0) {
+        DWORD got = GetEnvironmentVariableA("PORPOISE_OSREPORT_FILE",
+                                            s_osReportFilePath,
+                                            (DWORD)sizeof(s_osReportFilePath));
+        if (got == 0 || got >= sizeof(s_osReportFilePath)) {
+            /* Default log path for local debugging when env var is not set. */
+            strncpy_s(s_osReportFilePath,
+                      sizeof(s_osReportFilePath),
+                      "osreport_runtime.log",
+                      _TRUNCATE);
+            s_osReportFileMode = 1;
+        } else {
+            s_osReportFileMode = 1;
+        }
+    }
+
+    if (s_osReportFileMode != 1) {
+        return;
+    }
+
+    FILE* f = NULL;
+    if (fopen_s(&f, s_osReportFilePath, "ab") != 0 || !f) {
+        return;
+    }
+
+    fwrite(text, 1, len, f);
+    fclose(f);
 }
 #endif
 
@@ -238,6 +275,7 @@ void OSReport(const char* fmt, ...) {
     buffer[totalLen] = '\0';
     /* Use Visual Studio debug output only - avoids console deadlock issues */
     OutputDebugStringA(buffer);
+    WriteOSReportToFile(buffer, totalLen);
 #else
     fwrite(buffer, 1, totalLen, stdout);
     fflush(stdout);

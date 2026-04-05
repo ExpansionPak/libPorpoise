@@ -22,12 +22,8 @@
 s32 CARDMountAsync(s32 chan, void* workArea, CARDCallback detachCallback,
                    CARDCallback attachCallback) {
     PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
-    
-    if (!CARDProbe(chan)) {
-        __CARDCards[chan].lastResult = CARD_RESULT_NOCARD;
-        return CARD_RESULT_NOCARD;
-    }
-    
+
+    /* Virtual-card mode: mount always succeeds. */
     __CARDCards[chan].mounted = TRUE;
     __CARDCards[chan].formatted = TRUE;
     __CARDCards[chan].workArea = workArea;
@@ -69,12 +65,12 @@ s32 CARDMount(s32 chan, void* workArea, CARDCallback detachCallback) {
  *---------------------------------------------------------------------------*/
 s32 CARDUnmount(s32 chan) {
     PP_GUARD_RET(chan >= 0 && chan < CARD_MAX_CHAN, CARD_RESULT_FATAL_ERROR, "invalid channel");
-    
-    if (!__CARDCards[chan].mounted) {
-        return CARD_RESULT_NOCARD;
-    }
-    
-    __CARDCards[chan].mounted = FALSE;
+
+    /*
+     * Keep virtual media logically present even after unmount calls so callers that
+     * immediately re-query card state do not fall into "no card" slow paths.
+     */
+    __CARDCards[chan].mounted = TRUE;
     __CARDCards[chan].workArea = NULL;
     
     OSReport("CARD: Unmounted slot %c\n", 'A' + chan);

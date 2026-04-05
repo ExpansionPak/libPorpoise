@@ -67,12 +67,12 @@ void GXSetColorUpdate(GXBool enabled) {
   notify_pixel_state();
 }
 
-void GXSetAlphaUpdate(bool enabled) {
+void GXSetAlphaUpdate(GXBool enabled) {
   update_gx_state(g_gxState().alphaUpdate, enabled);
   notify_pixel_state();
 }
 
-void GXSetZMode(bool compare_enable, GXCompare func, bool update_enable) {
+void GXSetZMode(GXBool compare_enable, GXCompare func, GXBool update_enable) {
   update_gx_state(g_gxState().depthCompare, compare_enable);
   update_gx_state(g_gxState().depthFunc, func);
   update_gx_state(g_gxState().depthUpdate, update_enable);
@@ -87,7 +87,7 @@ void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt) {}
 
 void GXSetDither(GXBool dither) {}
 
-void GXSetDstAlpha(bool enabled, u8 value) {
+void GXSetDstAlpha(GXBool enabled, u8 value) {
   if (enabled) {
     update_gx_state<u32>(g_gxState().dstAlpha, value);
   } else {
@@ -96,6 +96,13 @@ void GXSetDstAlpha(bool enabled, u8 value) {
   notify_pixel_state();
 }
 
-// TODO GXSetFieldMask
-// TODO GXSetFieldMode
+void GXSetFieldMask(GXBool odd_mask, GXBool even_mask) {
+  (void)odd_mask;
+  (void)even_mask;
+}
+
+void GXSetFieldMode(GXBool field_mode, GXBool half_aspect_ratio) {
+  (void)field_mode;
+  (void)half_aspect_ratio;
+}
 }

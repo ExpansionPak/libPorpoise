@@ -50,6 +50,7 @@
 /* Internal interrupt-lock helpers from OSInterrupt.c */
 extern u32 __OSSuspendInterruptLockForSleep(void);
 extern void __OSResumeInterruptLockAfterSleep(u32 depth);
+extern void __OSUnlockAllMutex(OSThread* thread);
 
 /* Store/load 64-bit pointer in gpr[0..1] for PC builds (context.gpr is u32[]) */
 #if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
@@ -281,6 +282,11 @@ static DWORD WINAPI ThreadWrapper(LPVOID param) {
         result = platform->func(platform->arg);
     }
     
+    /* Ensure we never leave the global interrupt lock held on thread exit. */
+    OSEnableInterrupts();
+
+    /* Match SDK behavior: thread exit releases all held mutexes. */
+    __OSUnlockAllMutex(thread);
     thread->state = OS_THREAD_STATE_MORIBUND;
     thread->val = result;
     thread->error = 0;
@@ -302,6 +308,11 @@ static void* ThreadWrapper(void* param) {
         result = platform->func(platform->arg);
     }
     
+    /* Ensure we never leave the global interrupt lock held on thread exit. */
+    OSEnableInterrupts();
+
+    /* Match SDK behavior: thread exit releases all held mutexes. */
+    __OSUnlockAllMutex(thread);
     thread->state = OS_THREAD_STATE_MORIBUND;
     thread->val = result;
     thread->error = 0;
@@ -545,6 +556,8 @@ BOOL OSCreateThread(OSThread* thread, void* (*func)(void*), void* param,
 void OSExitThread(void* val) {
     OSThread* thread = OSGetCurrentThread();
     if (thread) {
+        OSEnableInterrupts();
+        __OSUnlockAllMutex(thread);
         thread->val = val;
         thread->error = 0;
         thread->state = OS_THREAD_STATE_MORIBUND;
@@ -587,6 +600,7 @@ void OSCancelThread(OSThread* thread) {
     }
 #endif
     
+    __OSUnlockAllMutex(thread);
     thread->state = OS_THREAD_STATE_MORIBUND;
     thread->error = 1;
     thread->val = (void*)(uintptr_t)-1;

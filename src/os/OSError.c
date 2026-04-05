@@ -65,6 +65,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* Exception error handler table - exported as __OSErrorTable for compatibility */
 OSErrorHandler __OSErrorTable[OS_ERROR_MAX] = {NULL};

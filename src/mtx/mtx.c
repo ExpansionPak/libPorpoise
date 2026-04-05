@@ -145,9 +145,66 @@ void MTXScale(Mtx m, f32 xS, f32 yS, f32 zS) {
 }
 
 /*---------------------------------------------------------------------------*
+    Name:           MTXRotTrig
+
+    Description:    Creates a rotation matrix around X/Y/Z using precomputed
+                    sine/cosine values.
+
+    Arguments:      m      output matrix
+                    axis   'x','y','z' (case-insensitive)
+                    sinA   sine of angle
+                    cosA   cosine of angle
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void MTXRotTrig(Mtx m, char axis, f32 sinA, f32 cosA) {
+    MTXIdentity(m);
+    switch (axis) {
+        case 'x':
+        case 'X':
+            m[1][1] = cosA;
+            m[1][2] = -sinA;
+            m[2][1] = sinA;
+            m[2][2] = cosA;
+            break;
+        case 'y':
+        case 'Y':
+            m[0][0] = cosA;
+            m[0][2] = sinA;
+            m[2][0] = -sinA;
+            m[2][2] = cosA;
+            break;
+        case 'z':
+        case 'Z':
+            m[0][0] = cosA;
+            m[0][1] = -sinA;
+            m[1][0] = sinA;
+            m[1][1] = cosA;
+            break;
+        default:
+            break;
+    }
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXRotRad
+
+    Description:    Creates a rotation matrix around X/Y/Z from radians.
+
+    Arguments:      m      output matrix
+                    axis   'x','y','z' (case-insensitive)
+                    rad    angle in radians
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void MTXRotRad(Mtx m, char axis, f32 rad) {
+    MTXRotTrig(m, axis, sinf(rad), cosf(rad));
+}
+
+/*---------------------------------------------------------------------------*
     Name:           MTXRotDeg
 
-    Description:    Creates a rotation matrix from axis and angle in degrees.
+    Description:    Creates a rotation matrix around X/Y/Z from degrees.
 
     Arguments:      m      output matrix
                     axis   'x','y','z' (case-insensitive)
@@ -156,36 +213,7 @@ void MTXScale(Mtx m, f32 xS, f32 yS, f32 zS) {
     Returns:        none
  *---------------------------------------------------------------------------*/
 void MTXRotDeg(Mtx m, char axis, f32 deg) {
-    f32 rad = MTXDegToRad(deg);
-    f32 s = sinf(rad);
-    f32 c = cosf(rad);
-
-    MTXIdentity(m);
-    switch (axis) {
-        case 'x':
-        case 'X':
-            m[1][1] = c;
-            m[1][2] = -s;
-            m[2][1] = s;
-            m[2][2] = c;
-            break;
-        case 'y':
-        case 'Y':
-            m[0][0] = c;
-            m[0][2] = s;
-            m[2][0] = -s;
-            m[2][2] = c;
-            break;
-        case 'z':
-        case 'Z':
-            m[0][0] = c;
-            m[0][1] = -s;
-            m[1][0] = s;
-            m[1][1] = c;
-            break;
-        default:
-            break;
-    }
+    MTXRotRad(m, axis, MTXDegToRad(deg));
 }
 
 /*---------------------------------------------------------------------------*
@@ -253,6 +281,257 @@ void MTXRotAxisDeg(Mtx m, const Vec* axis, f32 deg) {
 }
 
 /*---------------------------------------------------------------------------*
+    Name:           MTXQuat
+
+    Description:    Creates a rotation matrix from quaternion (x,y,z,w).
+
+    Arguments:      m      output matrix
+                    q      quaternion
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void MTXQuat(Mtx m, const Quaternion* q) {
+    f32 x = q->x;
+    f32 y = q->y;
+    f32 z = q->z;
+    f32 w = q->w;
+    f32 n = x * x + y * y + z * z + w * w;
+
+    if (n <= 0.0f) {
+        MTXIdentity(m);
+        return;
+    }
+
+    {
+        f32 s = 2.0f / n;
+        f32 xx = x * x * s;
+        f32 yy = y * y * s;
+        f32 zz = z * z * s;
+        f32 xy = x * y * s;
+        f32 xz = x * z * s;
+        f32 yz = y * z * s;
+        f32 wx = w * x * s;
+        f32 wy = w * y * s;
+        f32 wz = w * z * s;
+
+        m[0][0] = 1.0f - (yy + zz);
+        m[0][1] = xy - wz;
+        m[0][2] = xz + wy;
+        m[0][3] = 0.0f;
+
+        m[1][0] = xy + wz;
+        m[1][1] = 1.0f - (xx + zz);
+        m[1][2] = yz - wx;
+        m[1][3] = 0.0f;
+
+        m[2][0] = xz - wy;
+        m[2][1] = yz + wx;
+        m[2][2] = 1.0f - (xx + yy);
+        m[2][3] = 0.0f;
+    }
+}
+
+static BOOL MtxStackCanPush(const MtxStackPtr sPtr) {
+    if (sPtr == NULL || sPtr->stackBase == NULL || sPtr->numMtx == 0) {
+        return FALSE;
+    }
+
+    if (sPtr->stackPtr == NULL) {
+        return TRUE;
+    }
+
+    return ((u32)((sPtr->stackPtr - sPtr->stackBase) / MTX_PTR_OFFSET) < (sPtr->numMtx - 1));
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXInitStack
+
+    Description:    Initializes matrix stack metadata after MTXAllocStack.
+
+    Arguments:      sPtr    target stack
+                    numMtx  number of matrices allocated to stackBase
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void MTXInitStack(MtxStackPtr sPtr, u32 numMtx) {
+    if (sPtr == NULL) {
+        return;
+    }
+
+    sPtr->numMtx = numMtx;
+    sPtr->stackPtr = NULL;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXGetStackPtr
+
+    Description:    Returns current top-of-stack matrix pointer.
+
+    Arguments:      sPtr    matrix stack
+
+    Returns:        top-of-stack pointer (or NULL if empty)
+ *---------------------------------------------------------------------------*/
+MtxPtr MTXGetStackPtr(MtxStackPtr sPtr) {
+    return sPtr ? sPtr->stackPtr : NULL;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXPush
+
+    Description:    Pushes a direct copy of m onto the matrix stack.
+
+    Arguments:      sPtr    matrix stack
+                    m       matrix to copy
+
+    Returns:        pointer to pushed matrix (or current pointer on overflow)
+ *---------------------------------------------------------------------------*/
+MtxPtr MTXPush(MtxStackPtr sPtr, Mtx m) {
+    MtxPtr dst;
+
+    if (!MtxStackCanPush(sPtr)) {
+        ASSERTMSG(FALSE, "MTXPush: stack overflow or uninitialized stack");
+        return sPtr ? sPtr->stackPtr : NULL;
+    }
+
+    dst = (sPtr->stackPtr == NULL) ? sPtr->stackBase : (sPtr->stackPtr + MTX_PTR_OFFSET);
+    MTXCopy(m, dst);
+    sPtr->stackPtr = dst;
+    return sPtr->stackPtr;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXPushFwd
+
+    Description:    Pushes forward composite matrix (top * m).
+
+    Arguments:      sPtr    matrix stack
+                    m       matrix to post-concatenate
+
+    Returns:        pointer to pushed matrix (or current pointer on overflow)
+ *---------------------------------------------------------------------------*/
+MtxPtr MTXPushFwd(MtxStackPtr sPtr, Mtx m) {
+    MtxPtr dst;
+
+    if (!MtxStackCanPush(sPtr)) {
+        ASSERTMSG(FALSE, "MTXPushFwd: stack overflow or uninitialized stack");
+        return sPtr ? sPtr->stackPtr : NULL;
+    }
+
+    if (sPtr->stackPtr == NULL) {
+        MTXCopy(m, sPtr->stackBase);
+        sPtr->stackPtr = sPtr->stackBase;
+        return sPtr->stackPtr;
+    }
+
+    dst = sPtr->stackPtr + MTX_PTR_OFFSET;
+    MTXConcat(sPtr->stackPtr, m, dst);
+    sPtr->stackPtr = dst;
+    return sPtr->stackPtr;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXPushInv
+
+    Description:    Pushes inverse composite matrix (inverse(m) * top).
+
+    Arguments:      sPtr    matrix stack
+                    m       matrix whose inverse is pre-concatenated
+
+    Returns:        pointer to pushed matrix (or current pointer on failure)
+ *---------------------------------------------------------------------------*/
+MtxPtr MTXPushInv(MtxStackPtr sPtr, Mtx m) {
+    MtxPtr dst;
+    Mtx mTmp;
+    Mtx invTmp;
+
+    if (!MtxStackCanPush(sPtr)) {
+        ASSERTMSG(FALSE, "MTXPushInv: stack overflow or uninitialized stack");
+        return sPtr ? sPtr->stackPtr : NULL;
+    }
+
+    if (sPtr->stackPtr == NULL) {
+        MTXCopy(m, sPtr->stackBase);
+        sPtr->stackPtr = sPtr->stackBase;
+        return sPtr->stackPtr;
+    }
+
+    MTXCopy(m, mTmp);
+    if (!MTXInverse(mTmp, invTmp)) {
+        ASSERTMSG(FALSE, "MTXPushInv: MTXInverse failed (singular matrix)");
+        return sPtr->stackPtr;
+    }
+
+    dst = sPtr->stackPtr + MTX_PTR_OFFSET;
+    MTXConcat(invTmp, sPtr->stackPtr, dst);
+    sPtr->stackPtr = dst;
+    return sPtr->stackPtr;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXPushInvXpose
+
+    Description:    Pushes inverse-transpose forward composite matrix
+                    (top * transpose(inverse(m))).
+
+    Arguments:      sPtr    matrix stack
+                    m       matrix to inverse-transpose and concatenate
+
+    Returns:        pointer to pushed matrix (or current pointer on failure)
+ *---------------------------------------------------------------------------*/
+MtxPtr MTXPushInvXpose(MtxStackPtr sPtr, Mtx m) {
+    MtxPtr dst;
+    Mtx mTmp;
+    Mtx invTmp;
+    Mtx invXposeTmp;
+
+    if (!MtxStackCanPush(sPtr)) {
+        ASSERTMSG(FALSE, "MTXPushInvXpose: stack overflow or uninitialized stack");
+        return sPtr ? sPtr->stackPtr : NULL;
+    }
+
+    if (sPtr->stackPtr == NULL) {
+        MTXCopy(m, sPtr->stackBase);
+        sPtr->stackPtr = sPtr->stackBase;
+        return sPtr->stackPtr;
+    }
+
+    MTXCopy(m, mTmp);
+    if (!MTXInverse(mTmp, invTmp)) {
+        ASSERTMSG(FALSE, "MTXPushInvXpose: MTXInverse failed (singular matrix)");
+        return sPtr->stackPtr;
+    }
+    MTXTranspose(invTmp, invXposeTmp);
+
+    dst = sPtr->stackPtr + MTX_PTR_OFFSET;
+    MTXConcat(sPtr->stackPtr, invXposeTmp, dst);
+    sPtr->stackPtr = dst;
+    return sPtr->stackPtr;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXPop
+
+    Description:    Pops one matrix from the stack.
+
+    Arguments:      sPtr    matrix stack
+
+    Returns:        new top-of-stack pointer, or NULL if stack becomes empty
+ *---------------------------------------------------------------------------*/
+MtxPtr MTXPop(MtxStackPtr sPtr) {
+    if (sPtr == NULL || sPtr->stackPtr == NULL) {
+        return NULL;
+    }
+
+    if (sPtr->stackPtr == sPtr->stackBase) {
+        sPtr->stackPtr = NULL;
+    } else {
+        sPtr->stackPtr -= MTX_PTR_OFFSET;
+    }
+
+    return sPtr->stackPtr;
+}
+
+/*---------------------------------------------------------------------------*
     Name:           MTXMultVec
 
     Description:    Multiplies a vector by a 3x4 matrix (includes translation).
@@ -274,6 +553,27 @@ void MTXMultVec(const Mtx m, const Vec* src, Vec* dst) {
 }
 
 /*---------------------------------------------------------------------------*
+    Name:           MTXMultVecArray
+
+    Description:    Multiplies an array of vectors by a 3x4 matrix
+                    (includes translation).
+
+    Arguments:      m        matrix
+                    srcBase  source vector array
+                    dstBase  destination vector array
+                    count    number of vectors
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void MTXMultVecArray(const Mtx m, const Vec* srcBase, Vec* dstBase, u32 count) {
+    while (count--) {
+        MTXMultVec(m, srcBase, dstBase);
+        ++srcBase;
+        ++dstBase;
+    }
+}
+
+/*---------------------------------------------------------------------------*
     Name:           MTXMultVecSR
 
     Description:    Multiplies a vector by the 3x3 (scale-rotate) part only.
@@ -292,6 +592,27 @@ void MTXMultVecSR(const Mtx m, const Vec* src, Vec* dst) {
     dst->x = m[0][0] * x + m[0][1] * y + m[0][2] * z;
     dst->y = m[1][0] * x + m[1][1] * y + m[1][2] * z;
     dst->z = m[2][0] * x + m[2][1] * y + m[2][2] * z;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           MTXMultVecArraySR
+
+    Description:    Multiplies an array of vectors by the 3x3 (scale-rotate)
+                    part of a matrix only (no translation).
+
+    Arguments:      m        matrix
+                    srcBase  source vector array
+                    dstBase  destination vector array
+                    count    number of vectors
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void MTXMultVecArraySR(const Mtx m, const Vec* srcBase, Vec* dstBase, u32 count) {
+    while (count--) {
+        MTXMultVecSR(m, srcBase, dstBase);
+        ++srcBase;
+        ++dstBase;
+    }
 }
 
 /*---------------------------------------------------------------------------*
@@ -321,6 +642,19 @@ f32 VECMag(const Vec* v) {
 }
 
 /*---------------------------------------------------------------------------*
+    Name:           VECSquareMag
+
+    Description:    Returns square magnitude of a vector.
+
+    Arguments:      v      input vector
+
+    Returns:        square magnitude
+ *---------------------------------------------------------------------------*/
+f32 VECSquareMag(const Vec* v) {
+    return v->x * v->x + v->y * v->y + v->z * v->z;
+}
+
+/*---------------------------------------------------------------------------*
     Name:           VECCrossProduct
 
     Description:    Cross product: axb = a x b
@@ -334,6 +668,35 @@ void VECCrossProduct(const Vec* a, const Vec* b, Vec* axb) {
     axb->x = a->y * b->z - a->z * b->y;
     axb->y = a->z * b->x - a->x * b->z;
     axb->z = a->x * b->y - a->y * b->x;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           VECSquareDistance
+
+    Description:    Returns square distance between vectors.
+
+    Arguments:      a, b   input vectors
+
+    Returns:        square distance
+ *---------------------------------------------------------------------------*/
+f32 VECSquareDistance(const Vec* a, const Vec* b) {
+    f32 dx = a->x - b->x;
+    f32 dy = a->y - b->y;
+    f32 dz = a->z - b->z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           VECDistance
+
+    Description:    Returns distance between vectors.
+
+    Arguments:      a, b   input vectors
+
+    Returns:        distance
+ *---------------------------------------------------------------------------*/
+f32 VECDistance(const Vec* a, const Vec* b) {
+    return sqrtf(VECSquareDistance(a, b));
 }
 
 /*---------------------------------------------------------------------------*
@@ -374,6 +737,125 @@ void VECAdd(const Vec* a, const Vec* b, Vec* ab) {
     ab->x = a->x + b->x;
     ab->y = a->y + b->y;
     ab->z = a->z + b->z;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           VECSubtract
+
+    Description:    Subtracts b from a (a - b).
+
+    Arguments:      a, b   input vectors
+                    a_b    output vector
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void VECSubtract(const Vec* a, const Vec* b, Vec* a_b) {
+    a_b->x = a->x - b->x;
+    a_b->y = a->y - b->y;
+    a_b->z = a->z - b->z;
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           VECReflect
+
+    Description:    Reflects incident vector about normal, returning unit vector.
+
+    Arguments:      src     incident vector (toward surface)
+                    normal  surface normal (away from surface)
+                    dst     reflected unit vector
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void VECReflect(const Vec* src, const Vec* normal, Vec* dst) {
+    f32 nx = normal->x;
+    f32 ny = normal->y;
+    f32 nz = normal->z;
+    f32 nLen = sqrtf(nx * nx + ny * ny + nz * nz);
+    f32 rx, ry, rz;
+    f32 rLen;
+
+    if (nLen <= 0.0f) {
+        dst->x = 0.0f;
+        dst->y = 0.0f;
+        dst->z = 0.0f;
+        return;
+    }
+
+    nx /= nLen;
+    ny /= nLen;
+    nz /= nLen;
+
+    {
+        f32 d = src->x * nx + src->y * ny + src->z * nz;
+        rx = src->x - 2.0f * d * nx;
+        ry = src->y - 2.0f * d * ny;
+        rz = src->z - 2.0f * d * nz;
+    }
+
+    rLen = sqrtf(rx * rx + ry * ry + rz * rz);
+    if (rLen > 0.0f) {
+        f32 inv = 1.0f / rLen;
+        dst->x = rx * inv;
+        dst->y = ry * inv;
+        dst->z = rz * inv;
+    } else {
+        dst->x = 0.0f;
+        dst->y = 0.0f;
+        dst->z = 0.0f;
+    }
+}
+
+/*---------------------------------------------------------------------------*
+    Name:           VECHalfAngle
+
+    Description:    Computes unit half-angle vector between light/view vectors.
+
+    Arguments:      a      light->surface vector
+                    b      view->surface vector
+                    half   output half-angle unit vector (surface->halfway dir)
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void VECHalfAngle(const Vec* a, const Vec* b, Vec* half) {
+    f32 ax = -a->x;
+    f32 ay = -a->y;
+    f32 az = -a->z;
+    f32 bx = -b->x;
+    f32 by = -b->y;
+    f32 bz = -b->z;
+    f32 len;
+
+    len = sqrtf(ax * ax + ay * ay + az * az);
+    if (len > 0.0f) {
+        f32 inv = 1.0f / len;
+        ax *= inv;
+        ay *= inv;
+        az *= inv;
+    }
+
+    len = sqrtf(bx * bx + by * by + bz * bz);
+    if (len > 0.0f) {
+        f32 inv = 1.0f / len;
+        bx *= inv;
+        by *= inv;
+        bz *= inv;
+    }
+
+    half->x = ax + bx;
+    half->y = ay + by;
+    half->z = az + bz;
+
+    len = sqrtf(half->x * half->x + half->y * half->y + half->z * half->z);
+    if (len > 0.0f) {
+        f32 inv = 1.0f / len;
+        half->x *= inv;
+        half->y *= inv;
+        half->z *= inv;
+    } else {
+        half->x = 0.0f;
+        half->y = 0.0f;
+        half->z = 0.0f;
+    }
 }
 
 /*---------------------------------------------------------------------------*
@@ -634,6 +1116,39 @@ void MTXLightPerspective(Mtx m, f32 fovY, f32 aspect, f32 scaleS, f32 scaleT, f3
 }
 
 /*---------------------------------------------------------------------------*
+    Name:           MTXLightOrtho
+
+    Description:    Creates a 3x4 texture projection matrix for orthographic
+                    light/texgen projection.
+
+    Arguments:      m       output matrix (Mtx 3x4)
+                    t,b,l,r view volume extents
+                    scaleS, scaleT, transS, transT  texture scale/translation
+
+    Returns:        none
+ *---------------------------------------------------------------------------*/
+void MTXLightOrtho(Mtx m, f32 t, f32 b, f32 l, f32 r, f32 scaleS, f32 scaleT, f32 transS, f32 transT) {
+    f32 tmp;
+
+    tmp = 1.0f / (r - l);
+    m[0][0] = scaleS * (2.0f * tmp);
+    m[0][1] = 0.0f;
+    m[0][2] = 0.0f;
+    m[0][3] = scaleS * (tmp * -(r + l)) + transS;
+
+    tmp = 1.0f / (t - b);
+    m[1][0] = 0.0f;
+    m[1][1] = scaleT * (2.0f * tmp);
+    m[1][2] = 0.0f;
+    m[1][3] = scaleT * (tmp * -(t + b)) + transT;
+
+    m[2][0] = 0.0f;
+    m[2][1] = 0.0f;
+    m[2][2] = 0.0f;
+    m[2][3] = 1.0f;
+}
+
+/*---------------------------------------------------------------------------*
     Name:           MTXReflect
 
     Description:    Creates a reflection matrix from a plane point/normal.
@@ -687,6 +1202,37 @@ void C_MTXLightPerspective(Mtx m, f32 fovY, f32 aspect, f32 scaleS, f32 scaleT, 
 void PSMTXIdentity(Mtx m) { MTXIdentity(m); }
 void PSMTXCopy(const Mtx src, Mtx dst) { MTXCopy(src, dst); }
 void PSMTXConcat(const Mtx a, const Mtx b, Mtx ab) { MTXConcat(a, b, ab); }
+void PSMTXMultVecArray(const Mtx m, const Vec* srcBase, Vec* dstBase, u32 count) { MTXMultVecArray(m, srcBase, dstBase, count); }
+
+void PSMTXReorder(const Mtx src, ROMtx dest) {
+    dest[0][0] = src[0][0];
+    dest[0][1] = src[1][0];
+    dest[0][2] = src[2][0];
+    dest[1][0] = src[0][1];
+    dest[1][1] = src[1][1];
+    dest[1][2] = src[2][1];
+    dest[2][0] = src[0][2];
+    dest[2][1] = src[1][2];
+    dest[2][2] = src[2][2];
+    dest[3][0] = src[0][3];
+    dest[3][1] = src[1][3];
+    dest[3][2] = src[2][3];
+}
+
+void PSMTXROMultVecArray(const ROMtx m, const Vec* srcBase, Vec* dstBase, u32 count) {
+    while (count--) {
+        f32 x = srcBase->x;
+        f32 y = srcBase->y;
+        f32 z = srcBase->z;
+
+        dstBase->x = m[0][0] * x + m[1][0] * y + m[2][0] * z + m[3][0];
+        dstBase->y = m[0][1] * x + m[1][1] * y + m[2][1] * z + m[3][1];
+        dstBase->z = m[0][2] * x + m[1][2] * y + m[2][2] * z + m[3][2];
+
+        ++srcBase;
+        ++dstBase;
+    }
+}
 
 void PSMTXScale(Mtx m, f32 xS, f32 yS, f32 zS) {
     m[0][0] = xS;

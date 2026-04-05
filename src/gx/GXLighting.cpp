@@ -14,6 +14,29 @@ inline void notify_lighting_state() {
 } // namespace
 
 extern "C" {
+static int gx_light_id_to_index(GXLightID id) {
+  switch (id) {
+  case GX_LIGHT0:
+    return 0;
+  case GX_LIGHT1:
+    return 1;
+  case GX_LIGHT2:
+    return 2;
+  case GX_LIGHT3:
+    return 3;
+  case GX_LIGHT4:
+    return 4;
+  case GX_LIGHT5:
+    return 5;
+  case GX_LIGHT6:
+    return 6;
+  case GX_LIGHT7:
+    return 7;
+  default:
+    return -1;
+  }
+}
+
 void GXInitLightAttn(GXLightObj* light_, float a0, float a1, float a2, float k0, float k1, float k2) {
   auto* light = reinterpret_cast<GXLightObj_*>(light_);
   light->a0 = a0;
@@ -77,7 +100,7 @@ void GXInitLightSpot(GXLightObj* light_, float cutoff, GXSpotFn spotFn) {
   }
   case GX_SP_RING1: {
     const float d = (1.f - cr) * (1.f - cr);
-    a0 = 4.f * cr / d;
+    a0 = -4.f * cr / d;
     a1 = 4.f * (1.f + cr) / d;
     a2 = -4.f / d;
     break;
@@ -149,8 +172,9 @@ void GXInitLightColor(GXLightObj* light_, GXColor col) {
   notify_lighting_state();
 }
 
-void GXLoadLightObjImm(GXLightObj* light_, GXLightID id) {
-  u32 idx = std::log2<u32>(id);
+void GXLoadLightObjImm(const GXLightObj* light_, GXLightID id) {
+  const int idx = gx_light_id_to_index(id);
+  if (idx < 0) return;
   porpoise::gfx::gx::Light realLight;
   auto* light = reinterpret_cast<const GXLightObj_*>(light_);
   realLight.pos = {light->px, light->py, light->pz};
@@ -162,7 +186,15 @@ void GXLoadLightObjImm(GXLightObj* light_, GXLightID id) {
   notify_lighting_state();
 }
 
-// TODO GXLoadLightObjIndx
+void GXLoadLightObjIndx(u32 lt_obj_indx, GXLightID id) {
+  const auto& arr = g_gxState().arrays[GX_LIGHT_ARRAY];
+  const auto* base = static_cast<const u8*>(arr.data);
+  if (!base) return;
+
+  const u32 stride = arr.stride ? arr.stride : static_cast<u32>(sizeof(GXLightObj_));
+  const auto* light = reinterpret_cast<const GXLightObj_*>(base + (static_cast<size_t>(lt_obj_indx) * stride));
+  GXLoadLightObjImm(reinterpret_cast<const GXLightObj*>(light), id);
+}
 
 void GXSetChanAmbColor(GXChannelID id, GXColor color) {
   if (id == GX_COLOR0A0) {
