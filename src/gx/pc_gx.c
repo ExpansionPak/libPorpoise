@@ -44,6 +44,9 @@ static GXBool g_draw_done_pending = GX_FALSE;
 static volatile void* g_write_gather_redirect = NULL;
 static volatile void* g_write_gather_prev = NULL;
 static PCGXVertex g_pc_gx_expanded_prim[PC_GX_MAX_VERTS * 3];
+/* BP register decode shadow for PE control/cmode1 pixel-format coupling. */
+static int g_bp_pe_pixfmt_bits = 0;
+static int g_bp_cmode1_pix_subfmt = 0;
 
 /* Triangle strip CPU-expansion policy:
  * Default preserves GL/GX strip face semantics by swapping odd triangles.
@@ -396,6 +399,8 @@ void pc_gx_init(void) {
     g_gx.field_mask_even = 1;
     g_gx.pixel_fmt = GX_PF_RGB8_Z24;
     g_gx.z_fmt = GX_ZC_LINEAR;
+    g_bp_pe_pixfmt_bits = 0;
+    g_bp_cmode1_pix_subfmt = 0;
     g_gx.poke_alpha_func = GX_ALWAYS;
     g_gx.poke_alpha_threshold = 0;
     g_gx.poke_alpha_read_mode = GX_READ_FF;
@@ -2655,12 +2660,45 @@ void GXSetFieldMode(GXBool field_mode, GXBool half_aspect) {
     g_gx.field_mode = field_mode ? 1 : 0;
     g_gx.field_half_aspect = half_aspect ? 1 : 0;
 }
+
+static u32 pc_gx_pixfmt_to_pe_bits(GXPixelFmt pix_fmt) {
+    static const u32 p2f[8] = { 0, 1, 2, 3, 4, 4, 4, 5 };
+    if ((u32)pix_fmt < 8u) {
+        return p2f[(u32)pix_fmt];
+    }
+    return 0u;
+}
+
+static GXPixelFmt pc_gx_bp_decode_pixel_fmt(u32 pe_fmt_bits, u32 cmode1_subfmt) {
+    switch (pe_fmt_bits & 0x7u) {
+    case 0: return GX_PF_RGB8_Z24;
+    case 1: return GX_PF_RGBA6_Z24;
+    case 2: return GX_PF_RGB565_Z16;
+    case 3: return GX_PF_Z24;
+    case 4:
+        switch (cmode1_subfmt & 0x3u) {
+        case 0: return GX_PF_Y8;
+        case 1: return GX_PF_U8;
+        case 2: return GX_PF_V8;
+        default: return GX_PF_Y8;
+        }
+    case 5: return GX_PF_YUV420;
+    default: return GX_PF_RGB8_Z24;
+    }
+}
+
 void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt) {
+    u32 pe_fmt_bits;
     pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_COLOR_MASK);
     /* Track requested EFB format; backend currently uses a fixed GL render target format. */
     g_gx.pixel_fmt = pix_fmt;
     g_gx.z_fmt = z_fmt;
+    pe_fmt_bits = pc_gx_pixfmt_to_pe_bits(pix_fmt);
+    g_bp_pe_pixfmt_bits = (int)pe_fmt_bits;
+    if (pe_fmt_bits == 4u) {
+        g_bp_cmode1_pix_subfmt = ((int)pix_fmt - (int)GX_PF_Y8) & 0x3;
+    }
 }
 
 static int pc_gx_compare_u32(GXCompare func, u32 lhs, u32 rhs) {
@@ -5409,13 +5447,23 @@ static void pc_gx_dl_apply_bp_reg(u8 reg, u32 data24) {
     }
 
     if (reg == 0x42) {
+        g_bp_cmode1_pix_subfmt = (int)((data >> 9) & 0x3u);
         GXSetDstAlpha((GXBool)((data >> 8) & 0x1u), (u8)(data & 0xFFu));
+        if (((u32)g_bp_pe_pixfmt_bits & 0x7u) == 4u) {
+            GXSetPixelFmt(
+                pc_gx_bp_decode_pixel_fmt((u32)g_bp_pe_pixfmt_bits, (u32)g_bp_cmode1_pix_subfmt),
+                (GXZFmt16)g_gx.z_fmt
+            );
+        }
         return;
     }
 
     if (reg == 0x43) {
-        /* PE control register: pixel format, Z format, and Z compare location. */
-        GXSetPixelFmt((GXPixelFmt)(data & 0x7u), (GXZFmt16)((data >> 3) & 0x7u));
+        u32 pe_fmt_bits = data & 0x7u;
+        u32 z_fmt = (data >> 3) & 0x7u;
+        /* PE control register: pixel format (PE-encoded), Z format, and Z compare location. */
+        g_bp_pe_pixfmt_bits = (int)pe_fmt_bits;
+        GXSetPixelFmt(pc_gx_bp_decode_pixel_fmt(pe_fmt_bits, (u32)g_bp_cmode1_pix_subfmt), (GXZFmt16)z_fmt);
         GXSetZCompLoc((GXBool)((data >> 6) & 0x1u));
         return;
     }
