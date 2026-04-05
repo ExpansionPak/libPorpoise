@@ -5410,6 +5410,8 @@ static void pc_gx_dl_apply_bp_reg(u8 reg, u32 data24) {
     }
 
     if (reg == 0x43) {
+        /* PE control register: pixel format, Z format, and Z compare location. */
+        GXSetPixelFmt((GXPixelFmt)(data & 0x7u), (GXZFmt16)((data >> 3) & 0x7u));
         GXSetZCompLoc((GXBool)((data >> 6) & 0x1u));
         return;
     }
