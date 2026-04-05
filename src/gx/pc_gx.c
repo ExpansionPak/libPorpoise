@@ -1671,9 +1671,15 @@ void pc_gx_flush_vertices(void) {
             glDepthFunc(zfunc);
             depth_write_enable = g_gx.z_update_enable ? GL_TRUE : GL_FALSE;
         } else {
-            glDisable(GL_DEPTH_TEST);
-            /* GX docs: when compare is disabled, Z buffer is not updated. */
-            depth_write_enable = GL_FALSE;
+            /* GX compare disabled: treat compare as ALWAYS and keep update semantics. */
+            if (g_gx.z_update_enable) {
+                glEnable(GL_DEPTH_TEST);
+                glDepthFunc(GL_ALWAYS);
+                depth_write_enable = GL_TRUE;
+            } else {
+                glDisable(GL_DEPTH_TEST);
+                depth_write_enable = GL_FALSE;
+            }
         }
         glDepthMask(depth_write_enable);
     }
