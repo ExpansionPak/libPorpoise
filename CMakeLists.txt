@@ -29,7 +29,6 @@ option(PORPOISE_BUILD_EXAMPLES "Build example programs" OFF)
 option(PORPOISE_BUILD_PIKMIN_DEMO "Build the Pikmin demo target" OFF)
 option(PORPOISE_BUILD_SHARED "Build shared library" OFF)
 option(PORPOISE_USE_GECKO_MEMORY "Enable full memory emulation (locked cache support)" OFF)
-option(PORPOISE_USE_ACPC_GX "Use ACGC-PC-Port GX backend" ON)
 option(PORPOISE_USE_COOPERATIVE_THREADS "Use cooperative thread scheduler (OSThread.cpp)" OFF)
 set(PORPOISE_GUARD_MODE "LOG_RETURN" CACHE STRING "Runtime guard mode: OFF, LOG_RETURN, PANIC")
 set_property(CACHE PORPOISE_GUARD_MODE PROPERTY STRINGS OFF LOG_RETURN PANIC)
@@ -114,36 +113,8 @@ else()
     message(STATUS "Using real OS threads (OSThread.c)")
 endif()
 
-# GX backend source selection
-set(PORPOISE_GX_LEGACY_SOURCES
-    # GX (Graphics) - C++ implementation (Aurora-compatible)
-    src/gx/GXBump.cpp
-    src/gx/GXCull.cpp
-    src/gx/GXDispList.cpp
-    src/gx/GXDraw.cpp
-    src/gx/GXExtra.cpp
-    src/gx/GXFifo.cpp
-    src/gx/GXFrameBuffer.cpp
-    src/gx/GXGeometry.cpp
-    src/gx/GXGet.cpp
-    src/gx/GXLighting.cpp
-    src/gx/GXManage.cpp
-    src/gx/GXPerf.cpp
-    src/gx/GXPixel.cpp
-    src/gx/GXTev.cpp
-    src/gx/GXTexture.cpp
-    src/gx/GXTransform.cpp
-    src/gx/GXVert.cpp
-
-    # GX compatibility layer (legacy Aurora-style renderer)
-    src/gfx/logging.cpp
-    src/gfx/texture.cpp
-    src/gfx/gx_state.cpp
-    src/gfx/common.cpp
-    src/gfx/render.cpp
-)
-
-set(PORPOISE_GX_ACPC_SOURCES
+# GX backend source selection (ACPC-only)
+set(PORPOISE_GX_SOURCES
     # GX backend imported from ACGC-PC-Port
     src/gx/pc_gx.c
     src/gx/pc_gx_texture.c
@@ -153,12 +124,6 @@ set(PORPOISE_GX_ACPC_SOURCES
     src/gx/glad/src/gl.c
     src/gfx/render_acpc.cpp
 )
-
-if(PORPOISE_USE_ACPC_GX)
-    set(PORPOISE_GX_SOURCES ${PORPOISE_GX_ACPC_SOURCES})
-else()
-    set(PORPOISE_GX_SOURCES ${PORPOISE_GX_LEGACY_SOURCES})
-endif()
 
 # Source files
 set(PORPOISE_SOURCES
@@ -283,15 +248,13 @@ set_target_properties(porpoise PROPERTIES
     LINKER_LANGUAGE CXX
 )
 
-if(PORPOISE_USE_ACPC_GX)
-    target_include_directories(porpoise PUBLIC
-        ${CMAKE_SOURCE_DIR}/src/gx/glad/include
-    )
-    target_compile_definitions(porpoise PRIVATE
-        PORPOISE_GX_SHADER_DIR="${CMAKE_SOURCE_DIR}/src/gx/shaders"
-        PORPOISE_ACPC_SHADER_DIR="${CMAKE_SOURCE_DIR}/src/gx/shaders"
-    )
-endif()
+target_include_directories(porpoise PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/gx/glad/include
+)
+target_compile_definitions(porpoise PRIVATE
+    PORPOISE_GX_SHADER_DIR="${CMAKE_SOURCE_DIR}/src/gx/shaders"
+    PORPOISE_ACPC_SHADER_DIR="${CMAKE_SOURCE_DIR}/src/gx/shaders"
+)
 
 # Enable full memory emulation if requested
 if(PORPOISE_USE_GECKO_MEMORY)
@@ -397,5 +360,5 @@ message(STATUS "  Library type: ${PORPOISE_BUILD_SHARED}")
 message(STATUS "  Build examples: ${PORPOISE_BUILD_EXAMPLES}")
 message(STATUS "  Build Pikmin demo: ${PORPOISE_BUILD_PIKMIN_DEMO}")
 message(STATUS "  Full memory emulation: ${PORPOISE_USE_GECKO_MEMORY}")
-message(STATUS "  GX backend (ACPC): ${PORPOISE_USE_ACPC_GX}")
+message(STATUS "  GX backend: ACPC (fixed)")
 message(STATUS "  Guard mode: ${PORPOISE_GUARD_MODE_UPPER}")
