@@ -28,6 +28,7 @@ static inline u16 pc_gx_pack_rgb565(const u8* p);
 static void pc_gx_bbox_touch_draw(void);
 static void pc_gx_apply_viewport(void);
 static void pc_gx_apply_scissor(void);
+static float pc_gx_quantize_ind_mtx_coeff(float v);
 
 /* --- Global GX State --- */
 PCGXState g_gx;
@@ -138,6 +139,19 @@ static void pc_gx_debug_log(const char* msg) {
     fputs(msg, f);
     fputc('\n', f);
     fclose(f);
+}
+
+static float pc_gx_quantize_ind_mtx_coeff(float v) {
+    /* SDK/HW stores indirect matrix coefficients as signed 11-bit with 10 fractional bits. */
+    int q = ((int)(v * 1024.0f)) & 0x7FF;
+    if (q & 0x400) q -= 0x800;
+    return (float)q / 1024.0f;
+}
+
+/* Convert to TEV register signed-11 storage domain (-1024..1023). */
+static inline s16 pc_gx_wrap_s10_to_tev11(s32 value) {
+    u16 raw = (u16)((u32)value & 0x07FFu);
+    return (raw & 0x0400u) ? (s16)(raw | 0xF800u) : (s16)raw;
 }
 
 #ifdef PC_ENHANCEMENTS
@@ -287,12 +301,86 @@ static u32 pc_pack_gxcolor_u32(GXColor color) {
     return ((u32)color.r) | ((u32)color.g << 8) | ((u32)color.b << 16) | ((u32)color.a << 24);
 }
 
-/* Map tex matrix ID to slot: raw 0..9, GX enum 30..57 (stride 3), or 60=identity */
+/* Map first-pass tex matrix ID to slot: raw 0..9, GX enum 30..57 (stride 3), or 60=identity */
 static int pc_tex_mtx_id_to_slot(int id) {
     if (id == GX_IDENTITY) return -1;
     if (id >= 0 && id < 10) return id;
     if (id >= GX_TEXMTX0 && id < GX_IDENTITY) return (id - GX_TEXMTX0) / 3;
     return -1;
+}
+
+/* Map post-transform tex matrix ID to slot: raw 0..19, GX enum 64..121 (stride 3), or 125=identity. */
+static int pc_pt_tex_mtx_id_to_slot(int id) {
+    if (id == GX_PTIDENTITY) return -1;
+    if (id >= 0 && id < 20) return id;
+    if (id >= GX_PTTEXMTX0 && id < GX_PTIDENTITY) return (id - GX_PTTEXMTX0) / 3;
+    return -1;
+}
+
+static int pc_gx_texgen_func_valid(int func) {
+    return (func >= GX_TG_MTX3x4 && func <= GX_TG_SRTG);
+}
+
+static int pc_gx_texgen_is_regular(int func) {
+    return (func == GX_TG_MTX3x4 || func == GX_TG_MTX2x4);
+}
+
+static int pc_gx_texgen_is_bump(int func) {
+    return (func >= GX_TG_BUMP0 && func <= GX_TG_BUMP7);
+}
+
+static int pc_gx_texgen_src_valid(int func, int src) {
+    if (pc_gx_texgen_is_regular(func)) {
+        return (src >= GX_TG_POS && src <= GX_TG_TEX7);
+    }
+    if (pc_gx_texgen_is_bump(func)) {
+        return (src >= GX_TG_TEXCOORD0 && src <= GX_TG_TEXCOORD6);
+    }
+    if (func == GX_TG_SRTG) {
+        return (src == GX_TG_COLOR0 || src == GX_TG_COLOR1);
+    }
+    return 0;
+}
+
+static int pc_gx_texgen_mtx_valid(int func, int mtx) {
+    if (!pc_gx_texgen_is_regular(func)) {
+        return 1; /* Unused for bump/SRTG. */
+    }
+    return (pc_tex_mtx_id_to_slot(mtx) >= 0 || mtx == GX_IDENTITY);
+}
+
+static int pc_gx_texgen_post_mtx_valid(int postmtx) {
+    return (pc_pt_tex_mtx_id_to_slot(postmtx) >= 0 || postmtx == GX_PTIDENTITY);
+}
+
+static int pc_gx_texgen_only_pos_and_single_texcoord(void) {
+    int tex_count = 0;
+
+    if (g_gx.vtx_desc[GX_VA_POS] == GX_NONE) {
+        return 0;
+    }
+
+    if (g_gx.vtx_desc[GX_VA_NRM] != GX_NONE || g_gx.vtx_desc[GX_VA_NBT] != GX_NONE ||
+        g_gx.vtx_desc[GX_VA_CLR0] != GX_NONE || g_gx.vtx_desc[GX_VA_CLR1] != GX_NONE) {
+        return 0;
+    }
+
+    for (int i = GX_VA_TEX0; i <= GX_VA_TEX7; ++i) {
+        if (g_gx.vtx_desc[i] != GX_NONE) {
+            tex_count++;
+        }
+    }
+    if (tex_count != 1) {
+        return 0;
+    }
+
+    for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7MTXIDX; ++i) {
+        if (g_gx.vtx_desc[i] != GX_NONE) {
+            return 0;
+        }
+    }
+
+    return 1;
 }
 
 /* Commit pending vertex + flush batch to GL. Used by GXBegin/GXEnd/GXCopyDisp/etc. */
@@ -376,7 +464,13 @@ void pc_gx_init(void) {
         g_gx.tex_gen_type[i] = GX_TG_MTX2x4;
         g_gx.tex_gen_src[i] = GX_TG_TEX0 + i;
         g_gx.tex_gen_mtx[i] = GX_IDENTITY;
+        g_gx.tex_gen_post_mtx[i] = GX_PTIDENTITY;
         g_gx.tex_gen_normalize[i] = GX_FALSE;
+        g_gx.texcoord_cyl_wrap_s[i] = 0;
+        g_gx.texcoord_cyl_wrap_t[i] = 0;
+        g_gx.texcoord_manual_scale_enable[i] = 0;
+        g_gx.texcoord_manual_scale_s[i] = 1;
+        g_gx.texcoord_manual_scale_t[i] = 1;
     }
     g_gx.cull_mode = GX_CULL_BACK;
     g_gx.clip_mode = GX_CLIP_ENABLE;
@@ -467,6 +561,12 @@ void pc_gx_init(void) {
         g_gx.nrm_mtx[i][2][2] = 1.0f;
     }
 
+    for (int i = 0; i < 20; i++) {
+        g_gx.post_tex_mtx[i][0][0] = 1.0f;
+        g_gx.post_tex_mtx[i][1][1] = 1.0f;
+        g_gx.post_tex_mtx[i][2][2] = 1.0f;
+    }
+
     g_gx.tev_swap_table[0] = (PCGXTevSwapTable){0, 1, 2, 3};
     g_gx.tev_swap_table[1] = (PCGXTevSwapTable){0, 1, 2, 3};
     g_gx.tev_swap_table[2] = (PCGXTevSwapTable){0, 1, 2, 3};
@@ -507,9 +607,10 @@ void pc_gx_init(void) {
     g_gx.tev_stages[0].clamp_mode = GX_TC_LINEAR;
     g_gx.tev_stages[0].color_out = GX_TEVPREV;
     g_gx.tev_stages[0].alpha_out = GX_TEVPREV;
-    g_gx.tev_stages[0].tex_coord = GX_TEXCOORD_NULL;
-    g_gx.tev_stages[0].tex_map = GX_TEXMAP_NULL;
+    g_gx.tev_stages[0].tex_coord = GX_TEXCOORD0;
+    g_gx.tev_stages[0].tex_map = GX_TEXMAP0;
     g_gx.tev_stages[0].color_chan = GX_COLOR0A0;
+    g_gx.tev_stages[0].tex_lookup_enable = 0;
 
     /* Quad-to-triangle index buffer */
     for (int q = 0; q < PC_GX_MAX_VERTS / 4; q++) {
@@ -536,8 +637,12 @@ void pc_gx_init(void) {
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, position));
         glEnableVertexAttribArray(1);
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, normal));
+        glEnableVertexAttribArray(15);
+        glVertexAttribPointer(15, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, binormal));
         glEnableVertexAttribArray(2);
         glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void*)offsetof(PCGXVertex, color0));
+        glEnableVertexAttribArray(12);
+        glVertexAttribPointer(12, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void*)offsetof(PCGXVertex, color1));
         glEnableVertexAttribArray(3);
         glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, texcoord));
         glEnableVertexAttribArray(4);
@@ -548,6 +653,18 @@ void pc_gx_init(void) {
         glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, texcoord[2]));
         glEnableVertexAttribArray(7);
         glVertexAttribPointer(7, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, texcoord[3]));
+        glEnableVertexAttribArray(8);
+        glVertexAttribPointer(8, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, texcoord[4]));
+        glEnableVertexAttribArray(9);
+        glVertexAttribPointer(9, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, texcoord[5]));
+        glEnableVertexAttribArray(10);
+        glVertexAttribPointer(10, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, texcoord[6]));
+        glEnableVertexAttribArray(11);
+        glVertexAttribPointer(11, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, texcoord[7]));
+        glEnableVertexAttribArray(13);
+        glVertexAttribPointer(13, 4, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, tex_mtx_idx[0]));
+        glEnableVertexAttribArray(14);
+        glVertexAttribPointer(14, 4, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(PCGXVertex, tex_mtx_idx[4]));
     }
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gx.ebo);
@@ -631,22 +748,53 @@ void pc_gx_shutdown(void) {
 }
 
 /* --- Vertex Submission --- */
-void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
+void GXBegin(GXPrimitive primitive, GXVtxFmt vtxfmt, u16 nverts) {
     /* Auto-flush previous batch if GXEnd was omitted (normal on real HW) */
     pc_gx_commit_pending_and_flush();
 
-    g_gx.current_primitive = primitive;
-    g_gx.current_vtxfmt = vtxfmt;
-    g_gx.expected_vertex_count = nverts;
+    switch (primitive) {
+        case GX_QUADS:
+        case GX_TRIANGLES:
+        case GX_TRIANGLESTRIP:
+        case GX_TRIANGLEFAN:
+        case GX_LINES:
+        case GX_LINESTRIP:
+        case GX_POINTS:
+            break;
+        default:
+            /* SDK would assert here; fail soft on PC backend. */
+            primitive = GX_TRIANGLES;
+            break;
+    }
+    if ((u32)vtxfmt >= (u32)GX_MAX_VTXFMT) {
+        /* SDK would assert here; fail soft on PC backend. */
+        vtxfmt = GX_VTXFMT0;
+    }
+
+    g_gx.current_primitive = (u32)primitive;
+    g_gx.current_vtxfmt = (u32)vtxfmt;
+    /* Manual documents a maximum of 65536 vertices for the u16 count field. */
+    g_gx.expected_vertex_count = (nverts == 0) ? 65536 : (int)nverts;
     g_gx.current_vertex_idx = 0;
     g_gx.in_begin = 1;
     g_gx.vertex_pending = 0;
+    g_gx.nbt_normal_phase = 0;
+    g_gx.color_write_phase = 0;
+    g_gx.texcoord_write_phase = 0;
+    g_gx.matrix_index_write_phase = 0;
     memset(&g_gx.current_vertex, 0, sizeof(PCGXVertex));
     g_gx.current_vertex.color0[0] = 255;
     g_gx.current_vertex.color0[1] = 255;
     g_gx.current_vertex.color0[2] = 255;
     g_gx.current_vertex.color0[3] = 255;
+    g_gx.current_vertex.color1[0] = 255;
+    g_gx.current_vertex.color1[1] = 255;
+    g_gx.current_vertex.color1[2] = 255;
+    g_gx.current_vertex.color1[3] = 255;
     g_gx.current_vertex.pn_mtx_idx = (float)g_gx.current_mtx;
+    for (int i = 0; i < 8; ++i) {
+        g_gx.current_vertex.tex_mtx_idx[i] = (float)g_gx.current_tex_mtx_idx[i];
+    }
 }
 
 void GXEnd(void) {
@@ -662,17 +810,32 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
         g_gx.current_vertex_idx++;
     }
 
-    /* Reset vertex but carry last color forward */
-    u8 r = g_gx.current_vertex.color0[0];
-    u8 g = g_gx.current_vertex.color0[1];
-    u8 b = g_gx.current_vertex.color0[2];
-    u8 a = g_gx.current_vertex.color0[3];
+    /* Reset vertex but carry last colors forward */
+    u8 c0r = g_gx.current_vertex.color0[0];
+    u8 c0g = g_gx.current_vertex.color0[1];
+    u8 c0b = g_gx.current_vertex.color0[2];
+    u8 c0a = g_gx.current_vertex.color0[3];
+    u8 c1r = g_gx.current_vertex.color1[0];
+    u8 c1g = g_gx.current_vertex.color1[1];
+    u8 c1b = g_gx.current_vertex.color1[2];
+    u8 c1a = g_gx.current_vertex.color1[3];
     memset(&g_gx.current_vertex, 0, sizeof(PCGXVertex));
-    g_gx.current_vertex.color0[0] = r;
-    g_gx.current_vertex.color0[1] = g;
-    g_gx.current_vertex.color0[2] = b;
-    g_gx.current_vertex.color0[3] = a;
+    g_gx.nbt_normal_phase = 0;
+    g_gx.color_write_phase = 0;
+    g_gx.texcoord_write_phase = 0;
+    g_gx.matrix_index_write_phase = 0;
+    g_gx.current_vertex.color0[0] = c0r;
+    g_gx.current_vertex.color0[1] = c0g;
+    g_gx.current_vertex.color0[2] = c0b;
+    g_gx.current_vertex.color0[3] = c0a;
+    g_gx.current_vertex.color1[0] = c1r;
+    g_gx.current_vertex.color1[1] = c1g;
+    g_gx.current_vertex.color1[2] = c1b;
+    g_gx.current_vertex.color1[3] = c1a;
     g_gx.current_vertex.pn_mtx_idx = (float)g_gx.current_mtx;
+    for (int i = 0; i < 8; ++i) {
+        g_gx.current_vertex.tex_mtx_idx[i] = (float)g_gx.current_tex_mtx_idx[i];
+    }
 
     g_gx.current_vertex.position[0] = x;
     g_gx.current_vertex.position[1] = y;
@@ -731,14 +894,127 @@ static float pc_gx_current_position_frac_scale(void) {
     return pc_gx_frac_scale(fmt->attr_frac[GX_VA_POS]);
 }
 
-static float pc_gx_current_texcoord_frac_scale(void) {
+static float pc_gx_current_texcoord_frac_scale(u32 attr) {
     const PCGXVertexFormat* fmt = pc_gx_current_vertex_format();
+    if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) {
+        return pc_gx_frac_scale(fmt->attr_frac[attr]);
+    }
     return pc_gx_frac_scale(fmt->attr_frac[GX_VA_TEX0]);
 }
 
-static u8 pc_gx_current_color_type(void) {
+static u32 pc_gx_current_texcoord_attr(void) {
+    int phase = (int)g_gx.texcoord_write_phase;
+    int i;
+
+    for (i = GX_VA_TEX0; i <= GX_VA_TEX7; ++i) {
+        if (g_gx.vtx_desc[i] != GX_NONE) {
+            if (phase == 0) {
+                return (u32)i;
+            }
+            phase--;
+        }
+    }
+    return GX_VA_TEX0;
+}
+
+static u32 pc_gx_current_matrix_index_attr(void) {
+    int phase = (int)g_gx.matrix_index_write_phase;
+    int i;
+
+    for (i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7MTXIDX; ++i) {
+        if (g_gx.vtx_desc[i] != GX_NONE) {
+            if (phase == 0) {
+                return (u32)i;
+            }
+            phase--;
+        }
+    }
+
+    return GX_VA_PNMTXIDX;
+}
+
+static void pc_gx_advance_matrix_index_phase(void) {
+    int enabled = 0;
+    int i;
+
+    for (i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7MTXIDX; ++i) {
+        if (g_gx.vtx_desc[i] != GX_NONE) {
+            enabled++;
+        }
+    }
+
+    if (enabled <= 1) {
+        g_gx.matrix_index_write_phase = 0;
+        return;
+    }
+
+    if ((int)g_gx.matrix_index_write_phase < (enabled - 1)) {
+        g_gx.matrix_index_write_phase++;
+    }
+}
+
+static void pc_gx_advance_texcoord_phase(void) {
+    int enabled = 0;
+    int i;
+
+    for (i = GX_VA_TEX0; i <= GX_VA_TEX7; ++i) {
+        if (g_gx.vtx_desc[i] != GX_NONE) {
+            enabled++;
+        }
+    }
+
+    if (enabled <= 1) {
+        g_gx.texcoord_write_phase = 0;
+        return;
+    }
+
+    if ((int)g_gx.texcoord_write_phase < (enabled - 1)) {
+        g_gx.texcoord_write_phase++;
+    }
+}
+
+static u32 pc_gx_current_color_attr(void) {
+    int clr0 = g_gx.vtx_desc[GX_VA_CLR0];
+    int clr1 = g_gx.vtx_desc[GX_VA_CLR1];
+
+    if (clr0 != GX_NONE && clr1 != GX_NONE) {
+        return (g_gx.color_write_phase == 0) ? GX_VA_CLR0 : GX_VA_CLR1;
+    }
+    if (clr0 != GX_NONE) return GX_VA_CLR0;
+    if (clr1 != GX_NONE) return GX_VA_CLR1;
+    return GX_VA_CLR0;
+}
+
+static void pc_gx_advance_color_phase(void) {
+    int clr0 = g_gx.vtx_desc[GX_VA_CLR0];
+    int clr1 = g_gx.vtx_desc[GX_VA_CLR1];
+
+    if (clr0 != GX_NONE && clr1 != GX_NONE) {
+        if (g_gx.color_write_phase == 0) {
+            g_gx.color_write_phase = 1;
+        }
+    } else {
+        g_gx.color_write_phase = 0;
+    }
+}
+
+static void pc_gx_write_vertex_color(u32 attr, u8 r, u8 g, u8 b, u8 a) {
+    if (attr == GX_VA_CLR1) {
+        g_gx.current_vertex.color1[0] = r;
+        g_gx.current_vertex.color1[1] = g;
+        g_gx.current_vertex.color1[2] = b;
+        g_gx.current_vertex.color1[3] = a;
+    } else {
+        g_gx.current_vertex.color0[0] = r;
+        g_gx.current_vertex.color0[1] = g;
+        g_gx.current_vertex.color0[2] = b;
+        g_gx.current_vertex.color0[3] = a;
+    }
+}
+
+static u8 pc_gx_current_color_type(u32 attr) {
     const PCGXVertexFormat* fmt = pc_gx_current_vertex_format();
-    return fmt->attr_type[GX_VA_CLR0];
+    return fmt->attr_type[attr];
 }
 
 static void pc_gx_decode_color_u16(u16 clr, u8 type, u8* out_rgba) {
@@ -1014,16 +1290,74 @@ void GXPosition1x16(u16 index) {
     }
 }
 void GXPosition1x8(u8 index) { GXPosition1x16(index); }
-void GXMatrixIndex1x8(u8 index) {
+static void pc_gx_set_matrix_index_attr(u32 attr, u8 index) {
     u32 slot = (u32)index / 3u;
-    if (slot < 10u) {
+
+    if (attr == GX_VA_PNMTXIDX) {
+        if (slot >= 10u) return;
         g_gx.current_mtx = (int)slot;
+        if (g_gx.vertex_pending) {
+            g_gx.current_vertex.pn_mtx_idx = (float)slot;
+        }
         DIRTY(PC_GX_DIRTY_MODELVIEW);
+        return;
     }
+
+    if (attr >= GX_VA_TEX0MTXIDX && attr <= GX_VA_TEX7MTXIDX) {
+        u32 tex = attr - GX_VA_TEX0MTXIDX;
+        if (tex >= 8u) return;
+        if (slot >= 10u) return;
+        g_gx.current_tex_mtx_idx[tex] = (int)slot;
+        if (g_gx.vertex_pending) {
+            g_gx.current_vertex.tex_mtx_idx[tex] = (float)slot;
+        }
+    }
+}
+
+static u32 pc_gx_normal_vec_bytes(u8 type) {
+    switch (type) {
+        case GX_F32:
+            return 12u;
+        case GX_S16:
+        case GX_U16:
+            return 6u;
+        case GX_S8:
+        case GX_U8:
+        default:
+            return 3u;
+    }
+}
+
+void GXMatrixIndex1x8(u8 index) {
+    u32 attr = pc_gx_current_matrix_index_attr();
+    pc_gx_set_matrix_index_attr(attr, index);
+    pc_gx_advance_matrix_index_phase();
 }
 void GXMatrixIndex1u8(u8 index) { GXMatrixIndex1x8(index); }
 
 void GXNormal3f32(f32 x, f32 y, f32 z) {
+    const PCGXVertexFormat* fmt = pc_gx_current_vertex_format();
+    u8 ncnt = fmt->attr_cnt[GX_VA_NRM];
+
+    if (ncnt == GX_NRM_NBT || ncnt == GX_NRM_NBT3) {
+        if (g_gx.nbt_normal_phase == 0) {
+            g_gx.current_vertex.normal[0] = x;
+            g_gx.current_vertex.normal[1] = y;
+            g_gx.current_vertex.normal[2] = z;
+        } else if (g_gx.nbt_normal_phase == 1) {
+            g_gx.current_vertex.binormal[0] = x;
+            g_gx.current_vertex.binormal[1] = y;
+            g_gx.current_vertex.binormal[2] = z;
+        } else {
+            g_gx.current_vertex.tangent[0] = x;
+            g_gx.current_vertex.tangent[1] = y;
+            g_gx.current_vertex.tangent[2] = z;
+        }
+        g_gx.nbt_normal_phase = (u8)((g_gx.nbt_normal_phase + 1u) % 3u);
+        return;
+    }
+
+    g_gx.nbt_normal_phase = 0;
     g_gx.current_vertex.normal[0] = x;
     g_gx.current_vertex.normal[1] = y;
     g_gx.current_vertex.normal[2] = z;
@@ -1041,45 +1375,60 @@ void GXNormal1x16(u16 index) {
         const u8* base = (const u8*)g_gx.array_base[GX_VA_NRM];
         const u8* src = base + index * g_gx.array_stride[GX_VA_NRM];
         const PCGXVertexFormat* fmt = &g_gx.vtx_fmt[g_gx.current_vtxfmt];
+        u8 ncnt = fmt->attr_cnt[GX_VA_NRM];
         u8 type = fmt->attr_type[GX_VA_NRM];
         u8 frac = fmt->attr_frac[GX_VA_NRM];
         float x, y, z;
 
-        pc_gx_read_normal_indexed(src, type, frac, &x, &y, &z);
-        GXNormal3f32(x, y, z);
+        if (ncnt == GX_NRM_NBT) {
+            u32 vec_bytes = pc_gx_normal_vec_bytes(type);
+            for (u32 i = 0; i < 3; ++i) {
+                pc_gx_read_normal_indexed(src + i * vec_bytes, type, frac, &x, &y, &z);
+                GXNormal3f32(x, y, z);
+            }
+        } else {
+            pc_gx_read_normal_indexed(src, type, frac, &x, &y, &z);
+            GXNormal3f32(x, y, z);
+        }
     }
 }
 void GXNormal1x8(u8 index) { GXNormal1x16(index); }
 
 void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
-    g_gx.current_vertex.color0[0] = r;
-    g_gx.current_vertex.color0[1] = g;
-    g_gx.current_vertex.color0[2] = b;
-    g_gx.current_vertex.color0[3] = a;
+    u32 attr = pc_gx_current_color_attr();
+    pc_gx_write_vertex_color(attr, r, g, b, a);
+    pc_gx_advance_color_phase();
 }
 void GXColor3u8(u8 r, u8 g, u8 b) { GXColor4u8(r, g, b, 255); }
 void GXColor1u32(u32 clr) {
+    u32 attr = pc_gx_current_color_attr();
     u8 rgba[4];
-    pc_gx_decode_color_u32(clr, pc_gx_current_color_type(), rgba);
-    GXColor4u8(rgba[0], rgba[1], rgba[2], rgba[3]);
+    pc_gx_decode_color_u32(clr, pc_gx_current_color_type(attr), rgba);
+    pc_gx_write_vertex_color(attr, rgba[0], rgba[1], rgba[2], rgba[3]);
+    pc_gx_advance_color_phase();
 }
 void GXColor1u16(u16 clr) {
+    u32 attr = pc_gx_current_color_attr();
     u8 rgba[4];
-    pc_gx_decode_color_u16(clr, pc_gx_current_color_type(), rgba);
-    GXColor4u8(rgba[0], rgba[1], rgba[2], rgba[3]);
+    pc_gx_decode_color_u16(clr, pc_gx_current_color_type(attr), rgba);
+    pc_gx_write_vertex_color(attr, rgba[0], rgba[1], rgba[2], rgba[3]);
+    pc_gx_advance_color_phase();
 }
 void GXColor1x16(u16 index) {
-    if (g_gx.array_base[GX_VA_CLR0]) {
-        const u8* base = (const u8*)g_gx.array_base[GX_VA_CLR0];
-        const u8* src = base + index * g_gx.array_stride[GX_VA_CLR0];
+    u32 attr = pc_gx_current_color_attr();
+
+    if (g_gx.array_base[attr]) {
+        const u8* base = (const u8*)g_gx.array_base[attr];
+        const u8* src = base + index * g_gx.array_stride[attr];
         const PCGXVertexFormat* fmt = &g_gx.vtx_fmt[g_gx.current_vtxfmt];
-        u8 cnt = fmt->attr_cnt[GX_VA_CLR0];
-        u8 type = fmt->attr_type[GX_VA_CLR0];
+        u8 cnt = fmt->attr_cnt[attr];
+        u8 type = fmt->attr_type[attr];
         u8 rgba[4];
 
         if (cnt != GX_CLR_RGB && cnt != GX_CLR_RGBA) cnt = GX_CLR_RGBA;
         pc_gx_read_color_indexed(src, cnt, type, rgba);
-        GXColor4u8(rgba[0], rgba[1], rgba[2], rgba[3]);
+        pc_gx_write_vertex_color(attr, rgba[0], rgba[1], rgba[2], rgba[3]);
+        pc_gx_advance_color_phase();
     }
 }
 void GXColor1x8(u8 index) { GXColor1x16(index); }
@@ -1097,23 +1446,26 @@ static void pc_gx_set_texcoord_channel(u32 channel, f32 s, f32 t) {
 }
 
 void GXTexCoord2f32(f32 s, f32 t) {
-    pc_gx_set_texcoord_channel(0, s, t);
+    u32 attr = pc_gx_current_texcoord_attr();
+    u32 channel = (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) ? (attr - GX_VA_TEX0) : 0;
+    pc_gx_set_texcoord_channel(channel, s, t);
+    pc_gx_advance_texcoord_phase();
 }
 
 void GXTexCoord2u16(u16 s, u16 t) {
-    float scale = pc_gx_current_texcoord_frac_scale();
+    float scale = pc_gx_current_texcoord_frac_scale(pc_gx_current_texcoord_attr());
     GXTexCoord2f32((f32)s * scale, (f32)t * scale);
 }
 void GXTexCoord2s16(s16 s, s16 t) {
-    float scale = pc_gx_current_texcoord_frac_scale();
+    float scale = pc_gx_current_texcoord_frac_scale(pc_gx_current_texcoord_attr());
     GXTexCoord2f32((f32)s * scale, (f32)t * scale);
 }
 void GXTexCoord2u8(u8 s, u8 t) {
-    float scale = pc_gx_current_texcoord_frac_scale();
+    float scale = pc_gx_current_texcoord_frac_scale(pc_gx_current_texcoord_attr());
     GXTexCoord2f32((f32)s * scale, (f32)t * scale);
 }
 void GXTexCoord2s8(s8 s, s8 t) {
-    float scale = pc_gx_current_texcoord_frac_scale();
+    float scale = pc_gx_current_texcoord_frac_scale(pc_gx_current_texcoord_attr());
     GXTexCoord2f32((f32)s * scale, (f32)t * scale);
 }
 
@@ -1124,18 +1476,22 @@ void GXTexCoord1u8(u8 s) { GXTexCoord2u8(s, 0); }
 void GXTexCoord1s8(s8 s) { GXTexCoord2s8(s, 0); }
 
 void GXTexCoord1x16(u16 index) {
-    if (g_gx.array_base[GX_VA_TEX0]) {
-        const u8* base = (const u8*)g_gx.array_base[GX_VA_TEX0];
-        const u8* src = base + index * g_gx.array_stride[GX_VA_TEX0];
-        const PCGXVertexFormat* fmt = &g_gx.vtx_fmt[g_gx.current_vtxfmt];
-        u8 cnt = fmt->attr_cnt[GX_VA_TEX0];
-        u8 type = fmt->attr_type[GX_VA_TEX0];
-        u8 frac = fmt->attr_frac[GX_VA_TEX0];
+    u32 attr = pc_gx_current_texcoord_attr();
+
+    if (g_gx.array_base[attr]) {
+        const u8* base = (const u8*)g_gx.array_base[attr];
+        const u8* src = base + index * g_gx.array_stride[attr];
+        const PCGXVertexFormat* fmt = pc_gx_current_vertex_format();
+        u8 cnt = fmt->attr_cnt[attr];
+        u8 type = fmt->attr_type[attr];
+        u8 frac = fmt->attr_frac[attr];
         float s, t;
+        u32 channel = (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) ? (attr - GX_VA_TEX0) : 0;
 
         if (cnt != GX_TEX_S && cnt != GX_TEX_ST) cnt = GX_TEX_ST;
         pc_gx_read_texcoord_indexed(src, cnt, type, frac, &s, &t);
-        GXTexCoord2f32(s, t);
+        pc_gx_set_texcoord_channel(channel, s, t);
+        pc_gx_advance_texcoord_phase();
     }
 }
 void GXTexCoord1x8(u8 index) { GXTexCoord1x16(index); }
@@ -1160,26 +1516,28 @@ static void pc_gx_cache_uniform_locations(GLuint shader) {
 
     g_gx.uloc.num_tev_stages = UL("u_num_tev_stages");
     for (i = 0; i < PC_GX_MAX_TEV_STAGES; i++) {
-        snprintf(name, sizeof(name), "u_tev%d_color_in", i);
+        snprintf(name, sizeof(name), "u_tev_color_in[%d]", i);
         g_gx.uloc.tev_color_in[i] = UL(name);
-        snprintf(name, sizeof(name), "u_tev%d_alpha_in", i);
+        snprintf(name, sizeof(name), "u_tev_alpha_in[%d]", i);
         g_gx.uloc.tev_alpha_in[i] = UL(name);
-        snprintf(name, sizeof(name), "u_tev%d_color_op", i);
+        snprintf(name, sizeof(name), "u_tev_color_op[%d]", i);
         g_gx.uloc.tev_color_op[i] = UL(name);
-        snprintf(name, sizeof(name), "u_tev%d_alpha_op", i);
+        snprintf(name, sizeof(name), "u_tev_alpha_op[%d]", i);
         g_gx.uloc.tev_alpha_op[i] = UL(name);
-        snprintf(name, sizeof(name), "u_tev%d_color_chan", i);
+        snprintf(name, sizeof(name), "u_tev_color_chan[%d]", i);
         g_gx.uloc.tev_color_chan[i] = UL(name);
-        snprintf(name, sizeof(name), "u_tev%d_tc_src", i);
+        snprintf(name, sizeof(name), "u_tev_tc_src[%d]", i);
         g_gx.uloc.tev_tc_src[i] = UL(name);
-        snprintf(name, sizeof(name), "u_tev%d_ind_cfg", i);
+        snprintf(name, sizeof(name), "u_tev_ind_cfg[%d]", i);
         g_gx.uloc.tev_ind_cfg[i] = UL(name);
-        snprintf(name, sizeof(name), "u_tev%d_ind_wrap", i);
+        snprintf(name, sizeof(name), "u_tev_ind_wrap[%d]", i);
         g_gx.uloc.tev_ind_wrap[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev_clamp_mode[%d]", i);
+        g_gx.uloc.tev_clamp_mode[i] = UL(name);
     }
 
-    g_gx.uloc.kcolor   = UL("u_kcolor");
-    g_gx.uloc.tev_ksel = UL("u_tev_ksel");
+    g_gx.uloc.kcolor   = UL("u_kcolor[0]");
+    g_gx.uloc.tev_ksel = UL("u_tev_ksel[0]");
 
     g_gx.uloc.alpha_comp0 = UL("u_alpha_comp0");
     g_gx.uloc.alpha_ref0  = UL("u_alpha_ref0");
@@ -1222,34 +1580,64 @@ static void pc_gx_cache_uniform_locations(GLuint shader) {
         g_gx.uloc.light_dist_att[i] = UL(name);
     }
 
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < PC_GX_MAX_TEXGENS; i++) {
         snprintf(name, sizeof(name), "u_texmtx_enable[%d]", i);
         g_gx.uloc.texmtx_enable[i] = UL(name);
         snprintf(name, sizeof(name), "u_texmtx_row0[%d]", i);
         g_gx.uloc.texmtx_row0[i] = UL(name);
         snprintf(name, sizeof(name), "u_texmtx_row1[%d]", i);
         g_gx.uloc.texmtx_row1[i] = UL(name);
+        snprintf(name, sizeof(name), "u_texmtx_row2[%d]", i);
+        g_gx.uloc.texmtx_row2[i] = UL(name);
+        snprintf(name, sizeof(name), "u_texmtxidx_enable[%d]", i);
+        g_gx.uloc.texmtxidx_enable[i] = UL(name);
+        snprintf(name, sizeof(name), "u_postmtx_enable[%d]", i);
+        g_gx.uloc.postmtx_enable[i] = UL(name);
+        snprintf(name, sizeof(name), "u_postmtx_row0[%d]", i);
+        g_gx.uloc.postmtx_row0[i] = UL(name);
+        snprintf(name, sizeof(name), "u_postmtx_row1[%d]", i);
+        g_gx.uloc.postmtx_row1[i] = UL(name);
+        snprintf(name, sizeof(name), "u_postmtx_row2[%d]", i);
+        g_gx.uloc.postmtx_row2[i] = UL(name);
         snprintf(name, sizeof(name), "u_texgen_src[%d]", i);
         g_gx.uloc.texgen_src[i] = UL(name);
         snprintf(name, sizeof(name), "u_texgen_type[%d]", i);
         g_gx.uloc.texgen_type[i] = UL(name);
         snprintf(name, sizeof(name), "u_texgen_normalize[%d]", i);
         g_gx.uloc.texgen_normalize[i] = UL(name);
+        snprintf(name, sizeof(name), "u_texgen_qt_notcalc[%d]", i);
+        g_gx.uloc.texgen_qt_notcalc[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tcs_cyl_wrap_enable[%d]", i);
+        g_gx.uloc.tcs_cyl_wrap_enable[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tcs_manual_enable[%d]", i);
+        g_gx.uloc.tcs_manual_enable[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tcs_manual_scale[%d]", i);
+        g_gx.uloc.tcs_manual_scale[i] = UL(name);
+    }
+    for (i = 0; i < 10; i++) {
+        snprintf(name, sizeof(name), "u_texmtx_all_row0[%d]", i);
+        g_gx.uloc.texmtx_all_row0[i] = UL(name);
+        snprintf(name, sizeof(name), "u_texmtx_all_row1[%d]", i);
+        g_gx.uloc.texmtx_all_row1[i] = UL(name);
+        snprintf(name, sizeof(name), "u_texmtx_all_row2[%d]", i);
+        g_gx.uloc.texmtx_all_row2[i] = UL(name);
     }
 
     for (i = 0; i < PC_GX_MAX_TEV_STAGES; i++) {
-        snprintf(name, sizeof(name), "u_use_texture%d", i);
+        snprintf(name, sizeof(name), "u_use_texture[%d]", i);
         g_gx.uloc.use_texture[i] = UL(name);
-        snprintf(name, sizeof(name), "u_texture%d", i);
+        snprintf(name, sizeof(name), "u_texture[%d]", i);
         g_gx.uloc.texture[i] = UL(name);
     }
 
     g_gx.uloc.num_ind_stages = UL("u_num_ind_stages");
     for (i = 0; i < 4; i++) {
-        snprintf(name, sizeof(name), "u_ind_tex%d", i);
+        snprintf(name, sizeof(name), "u_ind_tex[%d]", i);
         g_gx.uloc.ind_tex[i] = UL(name);
         snprintf(name, sizeof(name), "u_ind_scale[%d]", i);
         g_gx.uloc.ind_scale[i] = UL(name);
+        snprintf(name, sizeof(name), "u_ind_tc_src[%d]", i);
+        g_gx.uloc.ind_tc_src[i] = UL(name);
     }
     for (i = 0; i < PC_GX_MAX_TEV_STAGES; i++) {
         snprintf(name, sizeof(name), "u_ind_mtx_r0[%d]", i);
@@ -1264,15 +1652,17 @@ static void pc_gx_cache_uniform_locations(GLuint shader) {
     g_gx.uloc.fog_color = UL("u_fog_color");
     g_gx.uloc.ztex_enable = UL("u_ztex_enable");
     g_gx.uloc.ztex_op = UL("u_ztex_op");
+    g_gx.uloc.ztex_fmt = UL("u_ztex_fmt");
     g_gx.uloc.ztex_bias = UL("u_ztex_bias");
+    g_gx.uloc.ztex_bias24 = UL("u_ztex_bias24");
 
     /* Per-stage bias/scale/clamp/output */
     for (i = 0; i < PC_GX_MAX_TEV_STAGES; i++) {
-        snprintf(name, sizeof(name), "u_tev%d_bsc", i);
+        snprintf(name, sizeof(name), "u_tev_bsc[%d]", i);
         g_gx.uloc.tev_bsc[i] = UL(name);
-        snprintf(name, sizeof(name), "u_tev%d_out", i);
+        snprintf(name, sizeof(name), "u_tev_out[%d]", i);
         g_gx.uloc.tev_out[i] = UL(name);
-        snprintf(name, sizeof(name), "u_tev%d_swap", i);
+        snprintf(name, sizeof(name), "u_tev_swap[%d]", i);
         g_gx.uloc.tev_swap[i] = UL(name);
     }
     g_gx.uloc.swap_table = UL("u_swap_table");
@@ -1452,6 +1842,7 @@ void pc_gx_flush_vertices(void) {
                 loc = UL(tev_color_chan[s]); if (loc >= 0) glUniform1i(loc, ts->color_chan);
                 loc = UL(tev_bsc[s]);  if (loc >= 0) glUniform4i(loc, ts->color_bias, ts->color_scale, ts->alpha_bias, ts->alpha_scale);
                 loc = UL(tev_out[s]);  if (loc >= 0) glUniform4i(loc, ts->color_clamp, ts->alpha_clamp, ts->color_out, ts->alpha_out);
+                loc = UL(tev_clamp_mode[s]); if (loc >= 0) glUniform1i(loc, ts->clamp_mode);
                 loc = UL(tev_swap[s]); if (loc >= 0) glUniform2i(loc, ts->ras_swap, ts->tex_swap);
             }
             loc = UL(tev_ksel);
@@ -1468,7 +1859,8 @@ void pc_gx_flush_vertices(void) {
                 int tc_src = 0;
                 if (s < g_gx.num_tev_stages) {
                     int tc = g_gx.tev_stages[s].tex_coord;
-                    if (tc >= GX_TEXCOORD0 && tc <= GX_TEXCOORD3) tc_src = tc;
+                    if (tc >= GX_TEXCOORD0 && tc <= GX_TEXCOORD7 &&
+                        tc < (int)g_gx.num_tex_gens) tc_src = tc;
                     else tc_src = 0;
                 }
                 loc = UL(tev_tc_src[s]); if (loc >= 0) glUniform1i(loc, tc_src);
@@ -1549,19 +1941,69 @@ void pc_gx_flush_vertices(void) {
         }
 
         if (dirty & PC_GX_DIRTY_TEXGEN) {
-            for (int tg = 0; tg < 4; tg++) {
+            for (int slot = 0; slot < 10; ++slot) {
+                const float* tm = (const float*)g_gx.tex_mtx[slot];
+                loc = g_gx.uloc.texmtx_all_row0[slot];
+                if (loc >= 0) glUniform4f(loc, tm[0], tm[1], tm[2], tm[3]);
+                loc = g_gx.uloc.texmtx_all_row1[slot];
+                if (loc >= 0) glUniform4f(loc, tm[4], tm[5], tm[6], tm[7]);
+                loc = g_gx.uloc.texmtx_all_row2[slot];
+                if (loc >= 0) glUniform4f(loc, tm[8], tm[9], tm[10], tm[11]);
+            }
+
+            for (int tg = 0; tg < PC_GX_MAX_TEXGENS; tg++) {
+                int texgen_func = g_gx.tex_gen_type[tg];
+                int texgen_norm = g_gx.tex_gen_normalize[tg];
+                int texgen_qt_notcalc = 0;
                 int mtx_id = g_gx.tex_gen_mtx[tg];
                 int slot = pc_tex_mtx_id_to_slot(mtx_id);
                 int has_mtx = (slot >= 0 && slot < 10);
+                int has_idx_mtx = (g_gx.vtx_desc[GX_VA_TEX0MTXIDX + tg] != GX_NONE);
+                int post_mtx_id = g_gx.tex_gen_post_mtx[tg];
+                int post_slot = pc_pt_tex_mtx_id_to_slot(post_mtx_id);
+                int has_post_mtx = (post_slot >= 0 && post_slot < 20);
+
+                /*
+                 * HW2 fast-path behavior:
+                 * when a vertex has only position + one texcoord and texgen is MTX2x4,
+                 * normalization is suppressed even if requested.
+                 */
+                if (texgen_norm && texgen_func == GX_TG_MTX2x4 &&
+                    pc_gx_texgen_only_pos_and_single_texcoord()) {
+                    texgen_norm = 0;
+                    texgen_qt_notcalc = 1;
+                }
+
                 loc = g_gx.uloc.texmtx_enable[tg]; if (loc >= 0) glUniform1i(loc, has_mtx);
+                loc = g_gx.uloc.texmtxidx_enable[tg]; if (loc >= 0) glUniform1i(loc, has_idx_mtx);
                 if (has_mtx) {
                     const float* tm = (const float*)g_gx.tex_mtx[slot];
                     loc = g_gx.uloc.texmtx_row0[tg]; if (loc >= 0) glUniform4f(loc, tm[0], tm[1], tm[2], tm[3]);
                     loc = g_gx.uloc.texmtx_row1[tg]; if (loc >= 0) glUniform4f(loc, tm[4], tm[5], tm[6], tm[7]);
+                    loc = g_gx.uloc.texmtx_row2[tg]; if (loc >= 0) glUniform4f(loc, tm[8], tm[9], tm[10], tm[11]);
+                }
+                loc = g_gx.uloc.postmtx_enable[tg]; if (loc >= 0) glUniform1i(loc, has_post_mtx);
+                if (has_post_mtx) {
+                    const float* ptm = (const float*)g_gx.post_tex_mtx[post_slot];
+                    loc = g_gx.uloc.postmtx_row0[tg]; if (loc >= 0) glUniform4f(loc, ptm[0], ptm[1], ptm[2], ptm[3]);
+                    loc = g_gx.uloc.postmtx_row1[tg]; if (loc >= 0) glUniform4f(loc, ptm[4], ptm[5], ptm[6], ptm[7]);
+                    loc = g_gx.uloc.postmtx_row2[tg]; if (loc >= 0) glUniform4f(loc, ptm[8], ptm[9], ptm[10], ptm[11]);
                 }
                 loc = g_gx.uloc.texgen_src[tg]; if (loc >= 0) glUniform1i(loc, g_gx.tex_gen_src[tg]);
                 loc = g_gx.uloc.texgen_type[tg]; if (loc >= 0) glUniform1i(loc, g_gx.tex_gen_type[tg]);
-                loc = g_gx.uloc.texgen_normalize[tg]; if (loc >= 0) glUniform1i(loc, g_gx.tex_gen_normalize[tg]);
+                loc = g_gx.uloc.texgen_normalize[tg]; if (loc >= 0) glUniform1i(loc, texgen_norm);
+                loc = g_gx.uloc.texgen_qt_notcalc[tg]; if (loc >= 0) glUniform1i(loc, texgen_qt_notcalc);
+                loc = g_gx.uloc.tcs_cyl_wrap_enable[tg];
+                if (loc >= 0) glUniform2i(loc, g_gx.texcoord_cyl_wrap_s[tg] ? 1 : 0, g_gx.texcoord_cyl_wrap_t[tg] ? 1 : 0);
+                loc = g_gx.uloc.tcs_manual_enable[tg]; if (loc >= 0) glUniform1i(loc, g_gx.texcoord_manual_scale_enable[tg] ? 1 : 0);
+                loc = g_gx.uloc.tcs_manual_scale[tg];
+                if (loc >= 0) {
+                    float ss = (float)g_gx.texcoord_manual_scale_s[tg];
+                    float ts = (float)g_gx.texcoord_manual_scale_t[tg];
+                    if (ss < 1.0f) ss = 1.0f;
+                    if (ts < 1.0f) ts = 1.0f;
+                    glUniform2f(loc, ss, ts);
+                }
             }
         }
 
@@ -1570,8 +2012,12 @@ void pc_gx_flush_vertices(void) {
             GLuint tex_obj_stage[PC_GX_MAX_TEV_STAGES] = { 0 };
             for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
                 if (s < g_gx.num_tev_stages) {
+                    int tc = g_gx.tev_stages[s].tex_coord;
                     int tex_map = g_gx.tev_stages[s].tex_map;
-                    if (tex_map >= 0 && tex_map < 8)
+                    int tex_lookup_enable = g_gx.tev_stages[s].tex_lookup_enable;
+                    int tc_valid = (tc >= GX_TEXCOORD0 && tc <= GX_TEXCOORD7 &&
+                                    tc < (int)g_gx.num_tex_gens);
+                    if (tex_lookup_enable && tc_valid && tex_map >= 0 && tex_map < 8)
                         tex_obj_stage[s] = g_gx.gl_textures[tex_map];
                 }
                 if (tex_obj_stage[s] != 0) {
@@ -1591,9 +2037,9 @@ void pc_gx_flush_vertices(void) {
         /* Indirect textures on units after regular TEV stage samplers. */
         if (dirty & (PC_GX_DIRTY_INDIRECT | PC_GX_DIRTY_TEXTURES)) {
             loc = UL(num_ind_stages); if (loc >= 0) glUniform1i(loc, g_gx.num_ind_stages);
-            for (int i = 0; i < g_gx.num_ind_stages && i < 4; i++) {
+            for (int i = 0; i < 4; i++) {
                 int ind_tex_map = g_gx.ind_order[i].tex_map;
-                if (ind_tex_map >= 0 && ind_tex_map < 8) {
+                if (i < g_gx.num_ind_stages && ind_tex_map >= 0 && ind_tex_map < 8) {
                     GLuint ind_tex = g_gx.gl_textures[ind_tex_map];
                     if (ind_tex) {
                         glActiveTexture(GL_TEXTURE0 + PC_GX_MAX_TEV_STAGES + i);
@@ -1601,6 +2047,7 @@ void pc_gx_flush_vertices(void) {
                     }
                 }
                 loc = UL(ind_tex[i]); if (loc >= 0) glUniform1i(loc, PC_GX_MAX_TEV_STAGES + i);
+                loc = UL(ind_tc_src[i]); if (loc >= 0) glUniform1i(loc, g_gx.ind_order[i].tex_coord);
                 loc = UL(ind_scale[i]);
                 if (loc >= 0) {
                     float s_scale = 1.0f / (float)(1 << g_gx.ind_order[i].scale_s);
@@ -1609,7 +2056,7 @@ void pc_gx_flush_vertices(void) {
                 }
             }
             for (int i = 0; i < 3; i++) {
-                float scale_val = ldexpf(1.0f, g_gx.ind_mtx_scale[i] + 17) / 1024.0f;
+                float scale_val = ldexpf(1.0f, g_gx.ind_mtx_scale[i]);
                 float packed[6];
                 for (int j = 0; j < 6; j++)
                     packed[j] = ((float*)g_gx.ind_mtx[i])[j] * scale_val;
@@ -1619,9 +2066,11 @@ void pc_gx_flush_vertices(void) {
             for (int s = 0; s < g_gx.num_tev_stages && s < PC_GX_MAX_TEV_STAGES; s++) {
                 PCGXTevStage* ts = &g_gx.tev_stages[s];
                 loc = UL(tev_ind_cfg[s]);
-                if (loc >= 0) glUniform4i(loc, ts->ind_stage, ts->ind_mtx, ts->ind_bias, ts->ind_alpha);
+                if (loc >= 0) glUniform4i(loc, ts->ind_stage, ts->ind_mtx, ts->ind_bias,
+                                          ((ts->ind_format & 0x3) << 2) | (ts->ind_alpha & 0x3));
                 loc = UL(tev_ind_wrap[s]);
-                if (loc >= 0) glUniform3i(loc, ts->ind_wrap_s, ts->ind_wrap_t, ts->ind_add_prev);
+                if (loc >= 0) glUniform3i(loc, ts->ind_wrap_s, ts->ind_wrap_t,
+                                          (ts->ind_add_prev ? 1 : 0) | ((ts->ind_lod ? 1 : 0) << 1));
             }
         }
         glActiveTexture(GL_TEXTURE0);
@@ -1634,14 +2083,19 @@ void pc_gx_flush_vertices(void) {
         }
 
         if (dirty & PC_GX_DIRTY_DEPTH) {
-            float z_bias_nrm = 0.0f;
-            int bias24 = g_gx.ztex_bias & 0x00FFFFFF;
-            if (bias24 & 0x00800000) bias24 |= ~0x00FFFFFF;
-            z_bias_nrm = (float)bias24 / 16777215.0f;
+            float z_bias_nrm = (float)(g_gx.ztex_bias & 0x00FFFFFF) / 16777215.0f;
+            int z_fmt_mode = 2; /* 0=Z8, 1=Z16, 2=Z24X8 */
+            if (g_gx.ztex_fmt == GX_TF_Z8) {
+                z_fmt_mode = 0;
+            } else if (g_gx.ztex_fmt == GX_TF_Z16) {
+                z_fmt_mode = 1;
+            }
 
             loc = UL(ztex_enable); if (loc >= 0) glUniform1i(loc, g_gx.ztex_op != GX_ZT_DISABLE);
             loc = UL(ztex_op);     if (loc >= 0) glUniform1i(loc, g_gx.ztex_op);
+            loc = UL(ztex_fmt);    if (loc >= 0) glUniform1i(loc, z_fmt_mode);
             loc = UL(ztex_bias);   if (loc >= 0) glUniform1f(loc, z_bias_nrm);
+            loc = UL(ztex_bias24); if (loc >= 0) glUniform1i(loc, (g_gx.ztex_bias & 0x00FFFFFF));
         }
 
         #undef UL
@@ -1678,15 +2132,9 @@ void pc_gx_flush_vertices(void) {
             glDepthFunc(zfunc);
             depth_write_enable = g_gx.z_update_enable ? GL_TRUE : GL_FALSE;
         } else {
-            /* GX compare disabled: treat compare as ALWAYS and keep update semantics. */
-            if (g_gx.z_update_enable) {
-                glEnable(GL_DEPTH_TEST);
-                glDepthFunc(GL_ALWAYS);
-                depth_write_enable = GL_TRUE;
-            } else {
-                glDisable(GL_DEPTH_TEST);
-                depth_write_enable = GL_FALSE;
-            }
+            /* SDK docs: compare disabled => Z buffering disabled and no Z updates. */
+            glDisable(GL_DEPTH_TEST);
+            depth_write_enable = GL_FALSE;
         }
         glDepthMask(depth_write_enable);
     }
@@ -1782,12 +2230,16 @@ void pc_gx_flush_vertices(void) {
     /* GXSetZCompLoc(GX_TRUE): depth compare/write occurs before texturing.
      * To emulate this with shader alpha test (discard), run a depth-only prepass
      * when alpha compare is active so depth updates are not blocked by discard. */
+    int used_z_prepass = 0;
+    GLint z_prepass_saved_depth_func = GL_LEQUAL;
+    GLboolean z_prepass_saved_depth_mask = GL_TRUE;
     {
         int alpha_compare_active = !(
             g_gx.alpha_comp0 == GX_ALWAYS &&
             g_gx.alpha_comp1 == GX_ALWAYS
         );
         int do_z_prepass = (shader != 0) &&
+                           g_gx.z_compare_enable &&
                            g_gx.z_update_enable &&
                            g_gx.z_comp_loc_before_tex &&
                            alpha_compare_active;
@@ -1800,6 +2252,8 @@ void pc_gx_flush_vertices(void) {
 
             glGetBooleanv(GL_COLOR_WRITEMASK, old_color_mask);
             glGetBooleanv(GL_DEPTH_WRITEMASK, &old_depth_mask);
+            glGetIntegerv(GL_DEPTH_FUNC, &z_prepass_saved_depth_func);
+            z_prepass_saved_depth_mask = old_depth_mask;
 
             glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
             glDepthMask(GL_TRUE);
@@ -1827,10 +2281,17 @@ void pc_gx_flush_vertices(void) {
             loc = g_gx.uloc.alpha_comp1; if (loc >= 0) glUniform1i(loc, g_gx.alpha_comp1);
             loc = g_gx.uloc.alpha_ref1;  if (loc >= 0) glUniform1i(loc, g_gx.alpha_ref1);
 
-            glDepthMask(old_depth_mask);
             glColorMask(old_color_mask[0], old_color_mask[1], old_color_mask[2], old_color_mask[3]);
             if (old_blend) glEnable(GL_BLEND);
             else glDisable(GL_BLEND);
+
+            /*
+             * Main color pass should hit exactly the fragments that survived
+             * prepass regardless of original compare func (e.g. GX_LESS).
+             */
+            glDepthFunc(GL_EQUAL);
+            glDepthMask(GL_FALSE);
+            used_z_prepass = 1;
         }
     }
 
@@ -1844,6 +2305,11 @@ void pc_gx_flush_vertices(void) {
         PC_GL_CHECK("glDrawArrays");
     }
 
+    if (used_z_prepass) {
+        glDepthFunc((GLenum)z_prepass_saved_depth_func);
+        glDepthMask(z_prepass_saved_depth_mask);
+    }
+
     if (g_gx.blend_mode == GX_BM_SUBTRACT)
         glBlendEquation(GL_FUNC_ADD);
 
@@ -1855,51 +2321,132 @@ void pc_gx_flush_vertices(void) {
 }
 
 /* --- Vertex Descriptor / Format --- */
-void GXSetVtxDesc(u32 attr, u32 type) {
-    if (attr < PC_GX_MAX_ATTR) g_gx.vtx_desc[attr] = type;
-}
-void GXSetVtxDescv(const void* list) {
-    const u32* p = (const u32*)list;
-    while (p[0] != GX_VA_NULL) {
-        GXSetVtxDesc(p[0], p[1]);
-        p += 2;
+void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
+    if (attr < GX_VA_PNMTXIDX || attr >= GX_VA_MAX_ATTR || attr >= PC_GX_MAX_ATTR) return;
+    if (type < GX_NONE || type > GX_INDEX16) return;
+
+    /* SDK behavior: NRM and NBT share one descriptor slot; setting one enabled
+     * disables the other unless explicitly set to GX_NONE. */
+    if (attr == GX_VA_NRM) {
+        g_gx.vtx_desc[GX_VA_NRM] = (int)type;
+        if (type != GX_NONE) g_gx.vtx_desc[GX_VA_NBT] = GX_NONE;
+        return;
     }
-}
-void GXClearVtxDesc(void) { memset(g_gx.vtx_desc, 0, sizeof(g_gx.vtx_desc)); }
-
-void GXSetVtxAttrFmt(u32 vtxfmt, u32 attr, u32 cnt, u32 type, u8 frac) {
-    if (vtxfmt < GX_MAX_VTXFMT && attr < PC_GX_MAX_ATTR) {
-        PCGXVertexFormat* fmt = &g_gx.vtx_fmt[vtxfmt];
-        fmt->attr_cnt[attr] = (u8)cnt;
-        fmt->attr_type[attr] = (u8)type;
-        fmt->attr_frac[attr] = frac;
-
-        if (attr == GX_VA_POS) fmt->has_position = 1;
-        if (attr == GX_VA_NRM) fmt->has_normal = 1;
-        if (attr == GX_VA_CLR0) fmt->has_color0 = 1;
-        if (attr == GX_VA_CLR1) fmt->has_color1 = 1;
-        if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) {
-            int tc = (int)attr - GX_VA_TEX0;
-            fmt->has_texcoord[tc] = 1;
-            fmt->texcoord_frac[tc] = frac;
-        }
+    if (attr == GX_VA_NBT) {
+        g_gx.vtx_desc[GX_VA_NBT] = (int)type;
+        if (type != GX_NONE) g_gx.vtx_desc[GX_VA_NRM] = GX_NONE;
+        return;
     }
+
+    g_gx.vtx_desc[attr] = (int)type;
 }
 
-void GXSetVtxAttrFmtv(u32 vtxfmt, void* list) {
+void GXSetVtxDescv(GXVtxDescList* list) {
     if (!list) return;
-    u32* p = (u32*)list;
-    while (p[0] != GX_VA_NULL) {
-        GXSetVtxAttrFmt(vtxfmt, p[0], p[1], p[2], (u8)p[3]);
-        p += 4;
+    while (list->attr != GX_VA_NULL) {
+        GXSetVtxDesc(list->attr, list->type);
+        ++list;
     }
 }
 
-void GXSetArray(u32 attr, const void* data, u8 stride) {
-    if (attr < GX_VA_MAX_ATTR) {
-        g_gx.array_base[attr] = data;
-        g_gx.array_stride[attr] = stride;
+void GXClearVtxDesc(void) {
+    memset(g_gx.vtx_desc, 0, sizeof(g_gx.vtx_desc));
+    /* SDK default keeps position enabled as direct input after clear. */
+    g_gx.vtx_desc[GX_VA_POS] = GX_DIRECT;
+}
+
+void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+    PCGXVertexFormat* fmt;
+    int tc;
+
+    if ((u32)vtxfmt >= GX_MAX_VTXFMT) return;
+    if ((u32)attr < GX_VA_POS || (u32)attr > GX_VA_MAX_ATTR) return;
+    if (frac >= 32) return;
+
+    /* SDK VAT entries are only defined for POS/NRM-NBT/CLR0-1/TEX0-7. */
+    if (!(
+        attr == GX_VA_POS || attr == GX_VA_NRM || attr == GX_VA_NBT ||
+        attr == GX_VA_CLR0 || attr == GX_VA_CLR1 ||
+        (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7)
+    )) {
+        return;
     }
+
+    fmt = &g_gx.vtx_fmt[vtxfmt];
+
+    if (attr == GX_VA_POS) {
+        fmt->attr_cnt[GX_VA_POS] = (u8)((cnt == GX_POS_XY) ? GX_POS_XY : GX_POS_XYZ);
+        fmt->attr_type[GX_VA_POS] = (u8)type;
+        fmt->attr_frac[GX_VA_POS] = frac;
+        fmt->has_position = 1;
+        return;
+    }
+
+    if (attr == GX_VA_NRM || attr == GX_VA_NBT) {
+        /* SDK behavior: NRM and NBT share VAT cnt/type/frac storage. */
+        u8 nrm_cnt = (u8)cnt;
+        if (attr == GX_VA_NRM) {
+            nrm_cnt = (u8)GX_NRM_XYZ;
+        } else if (nrm_cnt != GX_NRM_NBT && nrm_cnt != GX_NRM_NBT3) {
+            nrm_cnt = (u8)GX_NRM_NBT;
+        }
+
+        fmt->attr_cnt[GX_VA_NRM] = nrm_cnt;
+        fmt->attr_cnt[GX_VA_NBT] = nrm_cnt;
+        fmt->attr_type[GX_VA_NRM] = (u8)type;
+        fmt->attr_type[GX_VA_NBT] = (u8)type;
+        /* Normal VAT uses implied fixed-point fractions (S8=6, S16=14). */
+        fmt->attr_frac[GX_VA_NRM] = 0;
+        fmt->attr_frac[GX_VA_NBT] = 0;
+        fmt->has_normal = 1;
+        return;
+    }
+
+    if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
+        fmt->attr_cnt[attr] = (u8)((cnt == GX_CLR_RGB) ? GX_CLR_RGB : GX_CLR_RGBA);
+        fmt->attr_type[attr] = (u8)type;
+        /* Color VAT has no fractional field in hardware. */
+        fmt->attr_frac[attr] = 0;
+        if (attr == GX_VA_CLR0) fmt->has_color0 = 1;
+        else fmt->has_color1 = 1;
+        return;
+    }
+
+    /* TEX0-7 */
+    tc = (int)attr - GX_VA_TEX0;
+    fmt->attr_cnt[attr] = (u8)((cnt == GX_TEX_S) ? GX_TEX_S : GX_TEX_ST);
+    fmt->attr_type[attr] = (u8)type;
+    fmt->attr_frac[attr] = frac;
+    fmt->has_texcoord[tc] = 1;
+    fmt->texcoord_frac[tc] = frac;
+}
+
+void GXSetVtxAttrFmtv(GXVtxFmt vtxfmt, const GXVtxAttrFmtList* list) {
+    if (!list) return;
+    if ((u32)vtxfmt >= GX_MAX_VTXFMT) return;
+
+    while (list->attr != GX_VA_NULL) {
+        if ((u32)list->attr < GX_VA_POS || (u32)list->attr > GX_VA_MAX_ATTR) return;
+        if (list->frac >= 32) return;
+        GXSetVtxAttrFmt(vtxfmt, list->attr, list->cnt, list->type, list->frac);
+        ++list;
+    }
+}
+
+void GXSetArray(GXAttr attr, const void* data, u8 stride) {
+    GXAttr cp_attr = attr;
+
+    /* SDK behavior: NBT shares NRM attribute array slot. */
+    if (cp_attr == GX_VA_NBT) {
+        cp_attr = GX_VA_NRM;
+    }
+
+    /* SDK accepts GX_VA_POS .. GX_LIGHT_ARRAY for GXSetArray. */
+    if ((u32)cp_attr < GX_VA_POS || (u32)cp_attr > GX_LIGHT_ARRAY) return;
+    if ((u32)cp_attr >= PC_GX_MAX_ATTR) return;
+
+    g_gx.array_base[cp_attr] = data;
+    g_gx.array_stride[cp_attr] = stride;
 }
 
 void GXInvalidateVtxCache(void) { }
@@ -2037,24 +2584,28 @@ void GXLoadNrmMtxImm3x3(const void* mtx, u32 id) {
 
 void GXLoadTexMtxImm(const void* mtx, u32 id, u32 type) {
     int slot;
+    int post_slot;
+    float (*dst)[4];
     const float* src;
     if (!mtx) return;
     src = (const float*)mtx;
     pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_TEXGEN);
     slot = pc_tex_mtx_id_to_slot((int)id);
-    if (slot < 0 || slot >= 10) return;
+    post_slot = pc_pt_tex_mtx_id_to_slot((int)id);
+    if (slot < 0 && post_slot < 0) return;
+    dst = (slot >= 0) ? g_gx.tex_mtx[slot] : g_gx.post_tex_mtx[post_slot];
 
     if (type == GX_MTX2x4) {
         /* For 2x4 tex matrices, hardware effectively uses q=1. */
-        g_gx.tex_mtx[slot][0][0] = src[0]; g_gx.tex_mtx[slot][0][1] = src[1]; g_gx.tex_mtx[slot][0][2] = src[2]; g_gx.tex_mtx[slot][0][3] = src[3];
-        g_gx.tex_mtx[slot][1][0] = src[4]; g_gx.tex_mtx[slot][1][1] = src[5]; g_gx.tex_mtx[slot][1][2] = src[6]; g_gx.tex_mtx[slot][1][3] = src[7];
-        g_gx.tex_mtx[slot][2][0] = 0.0f;   g_gx.tex_mtx[slot][2][1] = 0.0f;   g_gx.tex_mtx[slot][2][2] = 0.0f;   g_gx.tex_mtx[slot][2][3] = 1.0f;
+        dst[0][0] = src[0]; dst[0][1] = src[1]; dst[0][2] = src[2]; dst[0][3] = src[3];
+        dst[1][0] = src[4]; dst[1][1] = src[5]; dst[1][2] = src[6]; dst[1][3] = src[7];
+        dst[2][0] = 0.0f;   dst[2][1] = 0.0f;   dst[2][2] = 0.0f;   dst[2][3] = 1.0f;
         return;
     }
 
     /* GX_MTX3x4 (and unknown values for compatibility): copy all 12 floats. */
-    memcpy(g_gx.tex_mtx[slot], mtx, sizeof(float) * 12);
+    memcpy(dst, mtx, sizeof(float) * 12);
 }
 
 void GXLoadPosMtxIndx(u16 index, u32 id) {
@@ -2162,20 +2713,17 @@ void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
 }
 
 void GXSetViewportv(const f32* vp) {
-    if (!vp) return;
     GXSetViewport(vp[0], vp[1], vp[2], vp[3], vp[4], vp[5]);
 }
 
 void GXGetViewportv(f32* vp) {
-    if (!vp) return;
     memcpy(vp, g_gx.viewport, sizeof(f32) * 6);
 }
 
 void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz, u32 field) {
-    int top_line = (int)floorf(top);
     f32 jittered_top = top;
-    if ( ((top_line & 1) != ((int)field & 1)) ) {
-        jittered_top += 0.5f;
+    if (field == VI_FIELD_BELOW) {
+        jittered_top -= 0.5f;
     }
     GXSetViewport(left, jittered_top, wd, ht, nearz, farz);
 }
@@ -2230,6 +2778,7 @@ static void pc_gx_apply_scissor(void) {
 }
 
 void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht) {
+    pc_gx_flush_if_begin_complete();
     g_gx.scissor[0] = left;
     g_gx.scissor[1] = top;
     g_gx.scissor[2] = wd;
@@ -2238,13 +2787,14 @@ void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht) {
 }
 
 void GXGetScissor(u32* xOrig, u32* yOrig, u32* wd, u32* ht) {
-    if (xOrig) *xOrig = (u32)g_gx.scissor[0];
-    if (yOrig) *yOrig = (u32)g_gx.scissor[1];
-    if (wd)    *wd    = (u32)g_gx.scissor[2];
-    if (ht)    *ht    = (u32)g_gx.scissor[3];
+    *xOrig = (u32)g_gx.scissor[0];
+    *yOrig = (u32)g_gx.scissor[1];
+    *wd    = (u32)g_gx.scissor[2];
+    *ht    = (u32)g_gx.scissor[3];
 }
 
 void GXSetScissorBoxOffset(s32 x, s32 y) {
+    pc_gx_flush_if_begin_complete();
     /* The GP works on 2x2 regions; offset values must be even. */
     x &= ~1;
     y &= ~1;
@@ -2255,22 +2805,17 @@ void GXSetScissorBoxOffset(s32 x, s32 y) {
 }
 void GXSetClipMode(GXClipMode mode) {
     pc_gx_flush_if_begin_complete();
-    g_gx.clip_mode = mode;
+    g_gx.clip_mode = (mode == GX_CLIP_DISABLE) ? GX_CLIP_DISABLE : GX_CLIP_ENABLE;
 #ifdef GL_DEPTH_CLAMP
-    /* Approximate GX clip disable behavior by clamping depth instead of clipping on Z. */
-    if (mode == GX_CLIP_DISABLE) {
-        glEnable(GL_DEPTH_CLAMP);
-    } else {
-        glDisable(GL_DEPTH_CLAMP);
-    }
-#else
-    (void)mode;
+    /*
+     * Keep clip-disable as a no-op for now.
+     * Direct GX clip-disable emulation does not map cleanly to GL state.
+     */
+    glDisable(GL_DEPTH_CLAMP);
 #endif
 }
 
 void GXGetProjectionv(f32* p) {
-    if (!p) return;
-
     p[0] = (f32)g_gx.projection_type;
     p[1] = g_gx.projection_mtx[0][0];
     p[3] = g_gx.projection_mtx[1][1];
@@ -2328,73 +2873,126 @@ void GXGetVtxDesc(GXAttr attr, GXAttrType* type) {
 }
 
 void GXGetVtxDescv(GXVtxDescList* out) {
-    u32 n = 0;
-    u32 attr;
-
     if (!out) return;
-    for (attr = GX_VA_PNMTXIDX; attr < GX_VA_MAX_ATTR && n < (GX_MAX_VTXDESCLIST_SZ - 1); ++attr) {
-        u32 type = (u32)g_gx.vtx_desc[attr];
-        if (type == GX_NONE) continue;
-        out[n].attr = (GXAttr)attr;
-        out[n].type = (GXAttrType)type;
-        ++n;
+    {
+        u32 n = 0;
+        u32 attr;
+        for (attr = GX_VA_PNMTXIDX; attr <= GX_VA_TEX7 && n < (GX_MAX_VTXDESCLIST_SZ - 1); ++attr) {
+            out[n].attr = (GXAttr)attr;
+            GXGetVtxDesc((GXAttr)attr, &out[n].type);
+            ++n;
+        }
+        if (n < (GX_MAX_VTXDESCLIST_SZ - 1)) {
+            out[n].attr = GX_VA_NBT;
+            GXGetVtxDesc(GX_VA_NBT, &out[n].type);
+            ++n;
+        }
+        out[n].attr = GX_VA_NULL;
+        out[n].type = GX_NONE;
     }
-    out[n].attr = GX_VA_NULL;
-    out[n].type = GX_NONE;
 }
 
 void GXGetVtxAttrFmt(GXVtxFmt idx, GXAttr attr, GXCompCnt* compCnt, GXCompType* compType, u8* shift) {
-    if (idx < GX_MAX_VTXFMT && attr < PC_GX_MAX_ATTR) {
-        const PCGXVertexFormat* fmt = &g_gx.vtx_fmt[idx];
-        if (compCnt) *compCnt = (GXCompCnt)fmt->attr_cnt[attr];
-        if (compType) *compType = (GXCompType)fmt->attr_type[attr];
-        if (shift) *shift = fmt->attr_frac[attr];
+    const PCGXVertexFormat* fmt;
+    GXCompType nrmType;
+
+    if ((u32)idx >= GX_MAX_VTXFMT) {
+        if (compCnt) *compCnt = (GXCompCnt)1;
+        if (compType) *compType = GX_U8;
+        if (shift) *shift = 0;
         return;
     }
-    if (compCnt) *compCnt = (GXCompCnt)0;
-    if (compType) *compType = (GXCompType)0;
-    if (shift) *shift = 0;
+
+    fmt = &g_gx.vtx_fmt[idx];
+    switch (attr) {
+        case GX_VA_POS:
+            if (compCnt) *compCnt = (GXCompCnt)fmt->attr_cnt[GX_VA_POS];
+            if (compType) *compType = (GXCompType)fmt->attr_type[GX_VA_POS];
+            if (shift) *shift = fmt->attr_frac[GX_VA_POS];
+            return;
+        case GX_VA_NRM:
+        case GX_VA_NBT:
+            if (compCnt) *compCnt = (GXCompCnt)fmt->attr_cnt[GX_VA_NRM];
+            nrmType = (GXCompType)fmt->attr_type[GX_VA_NRM];
+            if (compType) *compType = nrmType;
+            if (shift) {
+                switch (nrmType) {
+                    case GX_S8:
+                        *shift = 6;
+                        break;
+                    case GX_S16:
+                        *shift = 14;
+                        break;
+                    default:
+                        *shift = 0;
+                        break;
+                }
+            }
+            return;
+        case GX_VA_CLR0:
+        case GX_VA_CLR1:
+            if (compCnt) *compCnt = (GXCompCnt)fmt->attr_cnt[attr];
+            if (compType) *compType = (GXCompType)fmt->attr_type[attr];
+            if (shift) *shift = 0;
+            return;
+        case GX_VA_TEX0:
+        case GX_VA_TEX1:
+        case GX_VA_TEX2:
+        case GX_VA_TEX3:
+        case GX_VA_TEX4:
+        case GX_VA_TEX5:
+        case GX_VA_TEX6:
+        case GX_VA_TEX7:
+            if (compCnt) *compCnt = (GXCompCnt)fmt->attr_cnt[attr];
+            if (compType) *compType = (GXCompType)fmt->attr_type[attr];
+            if (shift) *shift = fmt->attr_frac[attr];
+            return;
+        default:
+            /* Mirrors SDK default branch for array/meta attributes. */
+            if (compCnt) *compCnt = (GXCompCnt)1;
+            if (compType) *compType = GX_U8;
+            if (shift) *shift = 0;
+            return;
+    }
 }
 
 void GXGetVtxAttrFmtv(GXVtxFmt idx, GXVtxAttrFmtList* out) {
-    static const u32 s_attrs[] = {
-        GX_VA_POS,  GX_VA_NRM,  GX_VA_NBT,  GX_VA_CLR0, GX_VA_CLR1,
-        GX_VA_TEX0, GX_VA_TEX1, GX_VA_TEX2, GX_VA_TEX3,
-        GX_VA_TEX4, GX_VA_TEX5, GX_VA_TEX6, GX_VA_TEX7
-    };
-    u32 n = 0;
+    GXAttr attr;
 
     if (!out) return;
-    if (idx >= GX_MAX_VTXFMT) {
+    if ((u32)idx >= GX_MAX_VTXFMT) {
         out[0].attr = GX_VA_NULL;
-        out[0].cnt = (GXCompCnt)0;
-        out[0].type = (GXCompType)0;
+        out[0].cnt = (GXCompCnt)1;
+        out[0].type = GX_U8;
         out[0].frac = 0;
         return;
     }
 
-    for (u32 i = 0; i < (u32)(sizeof(s_attrs) / sizeof(s_attrs[0])) && n < (GX_MAX_VTXATTRFMTLIST_SZ - 1); ++i) {
-        u32 attr = s_attrs[i];
-        const PCGXVertexFormat* fmt = &g_gx.vtx_fmt[idx];
-        out[n].attr = (GXAttr)attr;
-        out[n].cnt = (GXCompCnt)fmt->attr_cnt[attr];
-        out[n].type = (GXCompType)fmt->attr_type[attr];
-        out[n].frac = fmt->attr_frac[attr];
-        ++n;
+    for (attr = GX_VA_POS; attr <= GX_VA_TEX7; ++attr) {
+        out->attr = attr;
+        GXGetVtxAttrFmt(idx, attr, &out->cnt, &out->type, &out->frac);
+        ++out;
     }
-
-    out[n].attr = GX_VA_NULL;
-    out[n].cnt = (GXCompCnt)0;
-    out[n].type = (GXCompType)0;
-    out[n].frac = 0;
+    out->attr = GX_VA_NULL;
+    out->cnt = (GXCompCnt)1;
+    out->type = GX_U8;
+    out->frac = 0;
 }
 
 void GXGetArray(GXAttr attr, void** base_ptr, u8* stride) {
+    GXAttr cp_attr = attr;
     if (base_ptr) *base_ptr = NULL;
     if (stride) *stride = 0;
-    if (attr >= GX_VA_MAX_ATTR || attr >= PC_GX_MAX_ATTR) return;
-    if (base_ptr) *base_ptr = (void*)g_gx.array_base[attr];
-    if (stride) *stride = g_gx.array_stride[attr];
+
+    if (cp_attr == GX_VA_NBT) {
+        cp_attr = GX_VA_NRM;
+    }
+
+    if ((u32)cp_attr < GX_VA_POS || (u32)cp_attr > GX_LIGHT_ARRAY) return;
+    if ((u32)cp_attr >= PC_GX_MAX_ATTR) return;
+
+    if (base_ptr) *base_ptr = (void*)g_gx.array_base[cp_attr];
+    if (stride) *stride = g_gx.array_stride[cp_attr];
 }
 
 /* --- TEV Configuration --- */
@@ -2509,9 +3107,23 @@ void GXSetTevOrder(GXTevStageID stage, GXTexCoordID coord, GXTexMapID map, GXCha
     pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEXTURES);
     if (stage < 16) {
-        g_gx.tev_stages[stage].tex_coord = coord;
-        g_gx.tev_stages[stage].tex_map = map;
+        /*
+         * SDK behavior (GXTev.c):
+         * - map is masked with ~GX_TEX_DISABLE, then clamped into [0..GX_MAX_TEXMAP-1]
+         * - coord falls back to GX_TEXCOORD0 when coord is NULL/invalid
+         * - texture lookup enable is controlled only by map != GX_TEXMAP_NULL and no disable flag
+         */
+        u32 tmap = ((u32)map) & ~(u32)GX_TEX_DISABLE;
+        u32 tcoord = (coord >= GX_MAX_TEXCOORD) ? (u32)GX_TEXCOORD0 : (u32)coord;
+        if (tmap >= GX_MAX_TEXMAP) {
+            tmap = (u32)GX_TEXMAP0;
+        }
+
+        g_gx.tev_stages[stage].tex_coord = (int)tcoord;
+        g_gx.tev_stages[stage].tex_map = (int)tmap;
         g_gx.tev_stages[stage].color_chan = color;
+        g_gx.tev_stages[stage].tex_lookup_enable =
+            ((map != GX_TEXMAP_NULL) && ((((u32)map) & (u32)GX_TEX_DISABLE) == 0u)) ? 1 : 0;
 
         /*
          * GX demos commonly use:
@@ -2549,10 +3161,14 @@ void GXSetTevColorS10(GXTevRegID id, GXColorS10 color) {
     pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_TEV_COLORS);
     if (id < GX_MAX_TEVREG) {
-        g_gx.tev_colors[id][0] = (float)color.r / 255.0f;
-        g_gx.tev_colors[id][1] = (float)color.g / 255.0f;
-        g_gx.tev_colors[id][2] = (float)color.b / 255.0f;
-        g_gx.tev_colors[id][3] = (float)color.a / 255.0f;
+        const s16 r = pc_gx_wrap_s10_to_tev11((s32)color.r);
+        const s16 g = pc_gx_wrap_s10_to_tev11((s32)color.g);
+        const s16 b = pc_gx_wrap_s10_to_tev11((s32)color.b);
+        const s16 a = pc_gx_wrap_s10_to_tev11((s32)color.a);
+        g_gx.tev_colors[id][0] = (float)r / 255.0f;
+        g_gx.tev_colors[id][1] = (float)g / 255.0f;
+        g_gx.tev_colors[id][2] = (float)b / 255.0f;
+        g_gx.tev_colors[id][3] = (float)a / 255.0f;
     }
 }
 
@@ -2570,20 +3186,20 @@ void GXSetTevKColor(GXTevKColorID id, GXColor color) {
 void GXSetTevKColorSel(GXTevStageID stage, GXTevKColorSel sel) {
     pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_TEV_STAGES);
-    if (stage < 16) g_gx.tev_stages[stage].k_color_sel = sel;
+    if (stage < 16) g_gx.tev_stages[stage].k_color_sel = ((int)sel) & 0x1F;
 }
 void GXSetTevKAlphaSel(GXTevStageID stage, GXTevKAlphaSel sel) {
     pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_TEV_STAGES);
-    if (stage < 16) g_gx.tev_stages[stage].k_alpha_sel = sel;
+    if (stage < 16) g_gx.tev_stages[stage].k_alpha_sel = ((int)sel) & 0x1F;
 }
 
 void GXSetTevSwapMode(GXTevStageID stage, GXTevSwapSel ras_sel, GXTevSwapSel tex_sel) {
     pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_TEV_STAGES);
     if (stage < 16) {
-        g_gx.tev_stages[stage].ras_swap = ras_sel;
-        g_gx.tev_stages[stage].tex_swap = tex_sel;
+        g_gx.tev_stages[stage].ras_swap = ((int)ras_sel) & 0x3;
+        g_gx.tev_stages[stage].tex_swap = ((int)tex_sel) & 0x3;
     }
 }
 
@@ -2592,10 +3208,10 @@ void GXSetTevSwapModeTable(
     pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_SWAP_TABLES);
     if (table < 4) {
-        g_gx.tev_swap_table[table].r = red;
-        g_gx.tev_swap_table[table].g = green;
-        g_gx.tev_swap_table[table].b = blue;
-        g_gx.tev_swap_table[table].a = alpha;
+        g_gx.tev_swap_table[table].r = ((int)red) & 0x3;
+        g_gx.tev_swap_table[table].g = ((int)green) & 0x3;
+        g_gx.tev_swap_table[table].b = ((int)blue) & 0x3;
+        g_gx.tev_swap_table[table].a = ((int)alpha) & 0x3;
     }
 }
 
@@ -2603,10 +3219,10 @@ void GXSetTevSwapModeTable(
 void GXSetAlphaCompare(GXCompare comp0, u8 ref0, GXAlphaOp op, GXCompare comp1, u8 ref1) {
     pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_ALPHA_CMP);
-    g_gx.alpha_comp0 = comp0;
+    g_gx.alpha_comp0 = ((int)comp0) & 0x7;
     g_gx.alpha_ref0 = ref0;
-    g_gx.alpha_op = op;
-    g_gx.alpha_comp1 = comp1;
+    g_gx.alpha_op = ((int)op) & 0x3;
+    g_gx.alpha_comp1 = ((int)comp1) & 0x7;
     g_gx.alpha_ref1 = ref1;
 }
 
@@ -3137,7 +3753,6 @@ void GXSetCullMode(GXCullMode mode) {
     g_gx.cull_mode = g_pc_model_viewer_no_cull ? GX_CULL_NONE : mode;
 }
 void GXGetCullMode(GXCullMode* mode) {
-    if (!mode) return;
     *mode = (GXCullMode)g_gx.cull_mode;
 }
 
@@ -3204,7 +3819,8 @@ static int pc_gx_chan_index(u32 chan) {
 void GXSetNumChans(u8 nChans) {
     pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_LIGHTING);
-    g_gx.num_chans = nChans;
+    /* SDK contract is 0..2; clamp in release-style PC path. */
+    g_gx.num_chans = (nChans <= 2) ? nChans : 2;
 }
 
 void GXSetChanCtrl(u32 chan, GXBool enable, u32 amb_src, u32 mat_src,
@@ -3545,19 +4161,39 @@ void GXGetLightColor(void* lt, GXColor* color) {
 /* --- Texture Coordinate Generation --- */
 void GXSetNumTexGens(u8 n) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEXGEN);
+    DIRTY(PC_GX_DIRTY_TEXGEN | PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEXTURES);
     g_gx.num_tex_gens = (n > 8) ? 8 : n;
 }
 void GXSetTexCoordGen2(u32 dst, u32 func, u32 src, u32 mtx, GXBool normalize, u32 postmtx) {
+    int is_regular;
+
+    if (dst >= GX_MAX_TEXCOORD) {
+        return;
+    }
+    if (!pc_gx_texgen_func_valid((int)func)) {
+        return;
+    }
+    if (!pc_gx_texgen_src_valid((int)func, (int)src)) {
+        return;
+    }
+    if (!pc_gx_texgen_mtx_valid((int)func, (int)mtx)) {
+        return;
+    }
+
+    is_regular = pc_gx_texgen_is_regular((int)func);
+    if (is_regular) {
+        if (!pc_gx_texgen_post_mtx_valid((int)postmtx)) {
+            return;
+        }
+    }
+
     pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_TEXGEN);
-    if (dst < 8) {
-        g_gx.tex_gen_type[dst] = func;
-        g_gx.tex_gen_src[dst] = src;
-        g_gx.tex_gen_mtx[dst] = mtx;
-        g_gx.tex_gen_normalize[dst] = normalize ? 1 : 0;
-        (void)postmtx; /* TODO(HW2): support PT matrix path (GX_PTTEXMTXn / GX_PTIDENTITY). */
-    }
+    g_gx.tex_gen_type[dst] = func;
+    g_gx.tex_gen_src[dst] = src;
+    g_gx.tex_gen_mtx[dst] = mtx;
+    g_gx.tex_gen_post_mtx[dst] = postmtx;
+    g_gx.tex_gen_normalize[dst] = normalize ? 1 : 0;
 }
 void GXSetLineWidth(u8 width, GXTexOffset texOffsets) {
     g_gx.line_width = width;
@@ -3582,8 +4218,33 @@ void GXGetPointSize(u8* size, GXTexOffset* texOffsets) {
     if (size) *size = g_gx.point_size;
     if (texOffsets) *texOffsets = (GXTexOffset)g_gx.point_tex_offset;
 }
-void GXSetTexCoordScaleManually(u32 coord, GXBool enable, u16 ss, u16 ts) {
-    (void)coord; (void)enable; (void)ss; (void)ts;
+void GXSetTexCoordCylWrap(GXTexCoordID coord, GXBool s_enable, GXBool t_enable) {
+    if (coord >= GX_MAX_TEXCOORD) {
+        return;
+    }
+
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEXGEN);
+    g_gx.texcoord_cyl_wrap_s[coord] = s_enable ? 1u : 0u;
+    g_gx.texcoord_cyl_wrap_t[coord] = t_enable ? 1u : 0u;
+}
+void GXSetTexCoordScaleManually(GXTexCoordID coord, GXBool enable, u16 ss, u16 ts) {
+    if (coord >= GX_MAX_TEXCOORD) {
+        return;
+    }
+
+    pc_gx_flush_if_begin_complete();
+    DIRTY(PC_GX_DIRTY_TEXGEN);
+
+    g_gx.texcoord_manual_scale_enable[coord] = enable ? 1u : 0u;
+    if (enable) {
+        /*
+         * SDK programs SU size registers with (size - 1). Clamp here to avoid
+         * invalid 0-sized divisors in the shader path when callers pass 0.
+         */
+        g_gx.texcoord_manual_scale_s[coord] = (ss == 0u) ? 1u : ss;
+        g_gx.texcoord_manual_scale_t[coord] = (ts == 0u) ? 1u : ts;
+    }
 }
 void GXSetTexCoordBias(u32 coord, u8 s, u8 t) { (void)coord; (void)s; (void)t; }
 
@@ -4903,8 +5564,17 @@ static void pc_gx_dl_state_init(PCGXDLDecodeState* st) {
     memcpy(st->vtx_fmt, g_gx.vtx_fmt, sizeof(st->vtx_fmt));
     memcpy((void*)st->array_base, g_gx.array_base, sizeof(st->array_base));
     memcpy(st->array_stride, g_gx.array_stride, sizeof(st->array_stride));
-    st->matindex_a = (u32)(g_gx.current_mtx * 3u);
-    st->matindex_b = 0;
+    st->matindex_a =
+        ((u32)g_gx.current_mtx * 3u) |
+        (((u32)g_gx.current_tex_mtx_idx[0] * 3u) << 6) |
+        (((u32)g_gx.current_tex_mtx_idx[1] * 3u) << 12) |
+        (((u32)g_gx.current_tex_mtx_idx[2] * 3u) << 18) |
+        (((u32)g_gx.current_tex_mtx_idx[3] * 3u) << 24);
+    st->matindex_b =
+        (((u32)g_gx.current_tex_mtx_idx[4] * 3u) << 0) |
+        (((u32)g_gx.current_tex_mtx_idx[5] * 3u) << 6) |
+        (((u32)g_gx.current_tex_mtx_idx[6] * 3u) << 12) |
+        (((u32)g_gx.current_tex_mtx_idx[7] * 3u) << 18);
 }
 
 static int pc_gx_dl_read_comp_f32(const u8* ptr, u32 remaining, u8 type, u8 frac, float* out_value, u32* out_consumed) {
@@ -5029,6 +5699,28 @@ static int pc_gx_dl_read_color_direct(const u8* ptr, u32 remaining, u8 cnt, u8 t
     }
 }
 
+static u8 pc_gx_dl_get_default_matrix_index(const PCGXDLDecodeState* st, u32 attr) {
+    if (!st) return 0;
+
+    if (attr == GX_VA_PNMTXIDX) {
+        return (u8)(st->matindex_a & 0x3Fu);
+    }
+
+    if (attr >= GX_VA_TEX0MTXIDX && attr <= GX_VA_TEX3MTXIDX) {
+        u32 tex = attr - GX_VA_TEX0MTXIDX;
+        u32 shift = 6u * (tex + 1u);
+        return (u8)((st->matindex_a >> shift) & 0x3Fu);
+    }
+
+    if (attr >= GX_VA_TEX4MTXIDX && attr <= GX_VA_TEX7MTXIDX) {
+        u32 tex = attr - GX_VA_TEX4MTXIDX;
+        u32 shift = 6u * tex;
+        return (u8)((st->matindex_b >> shift) & 0x3Fu);
+    }
+
+    return 0;
+}
+
 static int pc_gx_dl_emit_indexed_attr(PCGXDLDecodeState* st, u8 vtxfmt, u32 attr, u32 index) {
     const PCGXVertexFormat* fmt;
     const u8* base;
@@ -5041,9 +5733,7 @@ static int pc_gx_dl_emit_indexed_attr(PCGXDLDecodeState* st, u8 vtxfmt, u32 attr
     if (attr >= PC_GX_MAX_ATTR) return 0;
 
     if (attr <= GX_VA_TEX7MTXIDX) {
-        if (attr == GX_VA_PNMTXIDX) {
-            GXSetCurrentMtx(index & 0x3Fu);
-        }
+        pc_gx_set_matrix_index_attr(attr, (u8)(index & 0x3Fu));
         return 1;
     }
 
@@ -5127,9 +5817,7 @@ static int pc_gx_dl_emit_direct_attr(PCGXDLDecodeState* st, u8 vtxfmt, u32 attr,
 
     if (attr <= GX_VA_TEX7MTXIDX) {
         if (remaining < 1) return 0;
-        if (attr == GX_VA_PNMTXIDX) {
-            GXSetCurrentMtx((u32)(ptr[0] & 0x3Fu));
-        }
+        pc_gx_set_matrix_index_attr(attr, (u8)(ptr[0] & 0x3Fu));
         *out_consumed = 1;
         return 1;
     }
@@ -5156,10 +5844,16 @@ static int pc_gx_dl_emit_direct_attr(PCGXDLDecodeState* st, u8 vtxfmt, u32 attr,
             for (i = 0; i < comp_count; ++i) {
                 float tmp;
                 if (!pc_gx_dl_read_comp_f32(ptr + used, remaining - used, type, frac, &tmp, &consumed)) return 0;
-                if (i < 3) comps[i] = tmp;
+                comps[i] = tmp;
                 used += consumed;
             }
-            GXNormal3f32(comps[0], comps[1], comps[2]);
+            if (comp_count == 9) {
+                GXNormal3f32(comps[0], comps[1], comps[2]);
+                GXNormal3f32(comps[3], comps[4], comps[5]);
+                GXNormal3f32(comps[6], comps[7], comps[8]);
+            } else {
+                GXNormal3f32(comps[0], comps[1], comps[2]);
+            }
             *out_consumed = used;
             return 1;
         case GX_VA_CLR0:
@@ -5677,7 +6371,12 @@ static u32 pc_gx_dl_execute_draw_command(const u8* ptr, u32 remaining, PCGXDLDec
 
     for (v = 0; v < nverts; ++v) {
         if (st->vtx_desc[GX_VA_PNMTXIDX] == GX_NONE) {
-            GXSetCurrentMtx(st->matindex_a & 0x3Fu);
+            pc_gx_set_matrix_index_attr(GX_VA_PNMTXIDX, pc_gx_dl_get_default_matrix_index(st, GX_VA_PNMTXIDX));
+        }
+        for (attr = GX_VA_TEX0MTXIDX; attr <= GX_VA_TEX7MTXIDX; ++attr) {
+            if (st->vtx_desc[attr] == GX_NONE) {
+                pc_gx_set_matrix_index_attr(attr, pc_gx_dl_get_default_matrix_index(st, attr));
+            }
         }
         for (attr = GX_VA_PNMTXIDX; attr <= GX_VA_TEX7; ++attr) {
             u32 type = (u32)st->vtx_desc[attr];
@@ -5695,6 +6394,12 @@ static u32 pc_gx_dl_execute_draw_command(const u8* ptr, u32 remaining, PCGXDLDec
                         GXEnd();
                         return 0;
                     }
+                    GXNormal1x8(cur[0]);
+                    GXNormal1x8(cur[1]);
+                    GXNormal1x8(cur[2]);
+                    cur += index_bytes;
+                    left -= index_bytes;
+                    continue;
                 }
                 if (!pc_gx_dl_emit_indexed_attr(st, vtxfmt, attr, (u32)cur[0])) {
                     GXEnd();
@@ -5715,6 +6420,12 @@ static u32 pc_gx_dl_execute_draw_command(const u8* ptr, u32 remaining, PCGXDLDec
                         GXEnd();
                         return 0;
                     }
+                    GXNormal1x16(pc_gx_dl_read_be16(cur + 0));
+                    GXNormal1x16(pc_gx_dl_read_be16(cur + 2));
+                    GXNormal1x16(pc_gx_dl_read_be16(cur + 4));
+                    cur += index_bytes;
+                    left -= index_bytes;
+                    continue;
                 }
                 index = (u32)pc_gx_dl_read_be16(cur);
                 if (!pc_gx_dl_emit_indexed_attr(st, vtxfmt, attr, index)) {
@@ -5979,38 +6690,60 @@ static GXIndTexWrap pc_gx_tile_size_to_wrap(u16 tile_size) {
 }
 
 void GXSetTevDirect(GXTevStageID stage) {
-    GXSetTevIndirect(stage, 0/*GX_INDTEXSTAGE0*/, 0/*GX_ITF_8*/, 0/*GX_ITB_NONE*/,
-                     0/*GX_ITM_OFF*/, 0/*GX_ITW_OFF*/, 0/*GX_ITW_OFF*/, 0, 0, 0/*GX_ITBA_OFF*/);
+    GXSetTevIndirect(stage, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_NONE,
+                     GX_ITM_OFF, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
 }
 void GXSetNumIndStages(u8 n) {
+    pc_gx_flush_if_begin_complete();
     DIRTY(PC_GX_DIRTY_INDIRECT);
-    if (n > 4) n = 4;
+    if (n > GX_MAX_INDTEXSTAGE) n = GX_MAX_INDTEXSTAGE;
     g_gx.num_ind_stages = n;
 }
 
 void GXSetIndTexMtx(GXIndTexMtxID mtx_sel, const void* offset, s8 scale) {
-    DIRTY(PC_GX_DIRTY_INDIRECT);
+    pc_gx_flush_if_begin_complete();
+
     int id;
     switch (mtx_sel) {
-        case 1: case 2: case 3:   id = mtx_sel - 1; break;
-        case 5: case 6: case 7:   id = mtx_sel - 5; break;
-        case 9: case 10: case 11: id = mtx_sel - 9; break;
-        default: return;
+        case GX_ITM_0: case GX_ITM_1: case GX_ITM_2:   id = mtx_sel - GX_ITM_0; break;
+        case GX_ITM_S0: case GX_ITM_S1: case GX_ITM_S2: id = mtx_sel - GX_ITM_S0; break;
+        case GX_ITM_T0: case GX_ITM_T1: case GX_ITM_T2: id = mtx_sel - GX_ITM_T0; break;
+        default: id = 0; break;
     }
-    if (id < 0 || id >= 3) return;
+    if (!offset) return;
+
     const float* mtx = (const float*)offset;
-    g_gx.ind_mtx[id][0][0] = mtx[0];
-    g_gx.ind_mtx[id][0][1] = mtx[1];
-    g_gx.ind_mtx[id][0][2] = mtx[2];
-    g_gx.ind_mtx[id][1][0] = mtx[3];
-    g_gx.ind_mtx[id][1][1] = mtx[4];
-    g_gx.ind_mtx[id][1][2] = mtx[5];
-    g_gx.ind_mtx_scale[id] = scale;
+    g_gx.ind_mtx[id][0][0] = pc_gx_quantize_ind_mtx_coeff(mtx[0]);
+    g_gx.ind_mtx[id][0][1] = pc_gx_quantize_ind_mtx_coeff(mtx[1]);
+    g_gx.ind_mtx[id][0][2] = pc_gx_quantize_ind_mtx_coeff(mtx[2]);
+    g_gx.ind_mtx[id][1][0] = pc_gx_quantize_ind_mtx_coeff(mtx[3]);
+    g_gx.ind_mtx[id][1][1] = pc_gx_quantize_ind_mtx_coeff(mtx[4]);
+    g_gx.ind_mtx[id][1][2] = pc_gx_quantize_ind_mtx_coeff(mtx[5]);
+
+    {
+        /* SDK stores (scale_exp + 17) in 6 bits; mirror effective decoded exponent. */
+        int scale_bits = (((int)scale) + 17) & 0x3F;
+        g_gx.ind_mtx_scale[id] = scale_bits - 17;
+    }
+
+    DIRTY(PC_GX_DIRTY_INDIRECT);
 }
 
 void GXSetIndTexOrder(GXIndTexStageID ind_stage, GXTexCoordID tex_coord, GXTexMapID tex_map) {
+    pc_gx_flush_if_begin_complete();
+
+    if (tex_map == GX_TEXMAP_NULL) {
+        tex_map = GX_TEXMAP0;
+    }
+    if (tex_coord == GX_TEXCOORD_NULL) {
+        tex_coord = GX_TEXCOORD0;
+    }
+
+    if (tex_map >= GX_MAX_TEXMAP) return;
+    if (tex_coord >= GX_MAX_TEXCOORD) return;
+    if (ind_stage >= GX_MAX_INDTEXSTAGE) return;
+
     DIRTY(PC_GX_DIRTY_INDIRECT);
-    if (ind_stage >= 4) return;
     g_gx.ind_order[ind_stage].tex_coord = tex_coord;
     g_gx.ind_order[ind_stage].tex_map = tex_map;
 }
@@ -6018,8 +6751,27 @@ void GXSetIndTexOrder(GXIndTexStageID ind_stage, GXTexCoordID tex_coord, GXTexMa
 void GXSetTevIndirect(GXTevStageID stage, GXIndTexStageID ind_stage, GXIndTexFormat fmt, GXIndTexBiasSel bias_sel,
                       GXIndTexMtxID mtx_sel, GXIndTexWrap wrap_s, GXIndTexWrap wrap_t, GXBool add_prev,
                       GXBool ind_lod, GXIndTexAlphaSel alpha_sel) {
+    pc_gx_flush_if_begin_complete();
+    if (stage >= GX_MAX_TEVSTAGE) return;
+
+    if (ind_stage >= GX_MAX_INDTEXSTAGE) ind_stage = GX_INDTEXSTAGE0;
+    if (fmt >= GX_MAX_ITFORMAT) fmt = GX_ITF_8;
+    if (bias_sel >= GX_MAX_ITBIAS) bias_sel = GX_ITB_NONE;
+    if (wrap_s >= GX_MAX_ITWRAP) wrap_s = GX_ITW_OFF;
+    if (wrap_t >= GX_MAX_ITWRAP) wrap_t = GX_ITW_OFF;
+    if (alpha_sel >= GX_MAX_ITBALPHA) alpha_sel = GX_ITBA_OFF;
+    switch (mtx_sel) {
+        case GX_ITM_OFF:
+        case GX_ITM_0: case GX_ITM_1: case GX_ITM_2:
+        case GX_ITM_S0: case GX_ITM_S1: case GX_ITM_S2:
+        case GX_ITM_T0: case GX_ITM_T1: case GX_ITM_T2:
+            break;
+        default:
+            mtx_sel = GX_ITM_OFF;
+            break;
+    }
+
     DIRTY(PC_GX_DIRTY_INDIRECT);
-    if (stage >= 16) return;
     PCGXTevStage* s = &g_gx.tev_stages[stage];
     s->ind_stage  = ind_stage;
     s->ind_format = fmt;
@@ -6092,8 +6844,12 @@ void GXSetTevIndRepeat(GXTevStageID tev_stage) {
 }
 
 void GXSetIndTexCoordScale(GXIndTexStageID ind_stage, GXIndTexScale scale_s, GXIndTexScale scale_t) {
+    pc_gx_flush_if_begin_complete();
+    if (ind_stage >= GX_MAX_INDTEXSTAGE) return;
+    if (scale_s >= GX_MAX_ITSCALE) scale_s = GX_ITS_256;
+    if (scale_t >= GX_MAX_ITSCALE) scale_t = GX_ITS_256;
+
     DIRTY(PC_GX_DIRTY_INDIRECT);
-    if (ind_stage >= 4) return;
     g_gx.ind_order[ind_stage].scale_s = scale_s;
     g_gx.ind_order[ind_stage].scale_t = scale_t;
 }
@@ -6102,8 +6858,27 @@ void __GXSetIndirectMask(u32 mask) { (void)mask; }
 
 /* --- Z Texture --- */
 void GXSetZTexture(GXZTexOp op, GXTexFmt fmt, u32 bias) {
-    g_gx.ztex_op = (int)op;
-    g_gx.ztex_fmt = (int)fmt;
+    pc_gx_flush_if_begin_complete();
+    switch (op) {
+        case GX_ZT_DISABLE:
+        case GX_ZT_ADD:
+        case GX_ZT_REPLACE:
+            g_gx.ztex_op = (int)op;
+            break;
+        default:
+            g_gx.ztex_op = GX_ZT_DISABLE;
+            break;
+    }
+    switch (fmt) {
+        case GX_TF_Z8:
+        case GX_TF_Z16:
+        case GX_TF_Z24X8:
+            g_gx.ztex_fmt = (int)fmt;
+            break;
+        default:
+            g_gx.ztex_fmt = GX_TF_Z24X8;
+            break;
+    }
     g_gx.ztex_bias = (int)(bias & 0x00FFFFFF);
     DIRTY(PC_GX_DIRTY_DEPTH);
 }
@@ -6685,7 +7460,12 @@ void GXResetStreamState(void) {
     g_gx.in_begin = 0;
     g_gx.vertex_pending = 0;
     g_gx.current_vertex_idx = 0;
+    g_gx.matrix_index_write_phase = 0;
     memset(&g_gx.current_vertex, 0, sizeof(g_gx.current_vertex));
+    g_gx.current_vertex.pn_mtx_idx = (float)g_gx.current_mtx;
+    for (int i = 0; i < 8; ++i) {
+        g_gx.current_vertex.tex_mtx_idx[i] = (float)g_gx.current_tex_mtx_idx[i];
+    }
 }
 
 

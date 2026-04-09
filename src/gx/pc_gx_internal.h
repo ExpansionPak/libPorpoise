@@ -67,10 +67,13 @@ typedef struct {
 typedef struct {
     float position[3];
     float normal[3];
+    float binormal[3];
+    float tangent[3];
     unsigned char color0[4];
     unsigned char color1[4];
     float texcoord[8][2];
     float pn_mtx_idx;
+    float tex_mtx_idx[8];
 } PCGXVertex;
 
 typedef struct {
@@ -80,6 +83,7 @@ typedef struct {
     int alpha_op, alpha_bias, alpha_scale, alpha_clamp, alpha_out;
     int clamp_mode;
     int tex_coord, tex_map, color_chan;
+    int tex_lookup_enable;
     int k_color_sel, k_alpha_sel;
     int ras_swap, tex_swap;
     int ind_stage, ind_format, ind_bias, ind_mtx, ind_wrap_s, ind_wrap_t;
@@ -100,6 +104,11 @@ typedef struct {
     PCGXVertex vertex_buffer[PC_GX_MAX_VERTS];
     int current_vertex_idx;
     PCGXVertex current_vertex;
+    u8 nbt_normal_phase;
+    u8 color_write_phase;
+    u8 texcoord_write_phase;
+    u8 matrix_index_write_phase;
+    int current_tex_mtx_idx[8];
 
     /* Vertex descriptor */
     int vtx_desc[PC_GX_MAX_ATTR];
@@ -117,6 +126,7 @@ typedef struct {
     float pos_mtx[10][3][4];
     float nrm_mtx[10][3][3];
     float tex_mtx[10][3][4];
+    float post_tex_mtx[20][3][4];
     int current_mtx;
 
     /* Viewport & scissor */
@@ -136,7 +146,13 @@ typedef struct {
     int tex_gen_type[8];
     int tex_gen_src[8];
     int tex_gen_mtx[8];
+    int tex_gen_post_mtx[8];
     int tex_gen_normalize[8];
+    u8 texcoord_cyl_wrap_s[8];
+    u8 texcoord_cyl_wrap_t[8];
+    u8 texcoord_manual_scale_enable[8];
+    u16 texcoord_manual_scale_s[8];
+    u16 texcoord_manual_scale_t[8];
     GLuint gl_textures[8];
     int tex_obj_w[8];
     int tex_obj_h[8];
@@ -268,19 +284,30 @@ typedef struct {
         GLint light_mask, light_pos[8], light_dir[8], light_color[8];
         GLint light_cos_att[8], light_dist_att[8];
         GLint light_mask1;
-        GLint texmtx_enable[PC_GX_MAX_TEXGENS], texmtx_row0[PC_GX_MAX_TEXGENS], texmtx_row1[PC_GX_MAX_TEXGENS];
+        GLint texmtx_enable[PC_GX_MAX_TEXGENS], texmtx_row0[PC_GX_MAX_TEXGENS], texmtx_row1[PC_GX_MAX_TEXGENS],
+              texmtx_row2[PC_GX_MAX_TEXGENS];
+        GLint texmtxidx_enable[PC_GX_MAX_TEXGENS];
+        GLint texmtx_all_row0[10], texmtx_all_row1[10], texmtx_all_row2[10];
+        GLint postmtx_enable[PC_GX_MAX_TEXGENS], postmtx_row0[PC_GX_MAX_TEXGENS], postmtx_row1[PC_GX_MAX_TEXGENS],
+              postmtx_row2[PC_GX_MAX_TEXGENS];
         GLint texgen_src[PC_GX_MAX_TEXGENS], texgen_type[PC_GX_MAX_TEXGENS], texgen_normalize[PC_GX_MAX_TEXGENS];
+        GLint texgen_qt_notcalc[PC_GX_MAX_TEXGENS];
+        GLint tcs_cyl_wrap_enable[PC_GX_MAX_TEXGENS];
+        GLint tcs_manual_enable[PC_GX_MAX_TEXGENS];
+        GLint tcs_manual_scale[PC_GX_MAX_TEXGENS];
         GLint use_texture[PC_GX_MAX_TEV_STAGES];
         GLint texture[PC_GX_MAX_TEV_STAGES];
         GLint tev_tc_src[PC_GX_MAX_TEV_STAGES];
         GLint tev_tex_map[PC_GX_MAX_TEV_STAGES];
         GLint num_ind_stages;
         GLint ind_tex[4], ind_scale[4];
+        GLint ind_tc_src[4];
         GLint ind_mtx_r0[PC_GX_MAX_TEV_STAGES], ind_mtx_r1[PC_GX_MAX_TEV_STAGES];
         GLint tev_ind_cfg[PC_GX_MAX_TEV_STAGES], tev_ind_wrap[PC_GX_MAX_TEV_STAGES];
         GLint fog_type, fog_start, fog_end, fog_color;
-        GLint ztex_enable, ztex_op, ztex_bias;
+        GLint ztex_enable, ztex_op, ztex_fmt, ztex_bias, ztex_bias24;
         GLint tev_bsc[PC_GX_MAX_TEV_STAGES], tev_out[PC_GX_MAX_TEV_STAGES];
+        GLint tev_clamp_mode[PC_GX_MAX_TEV_STAGES];
         GLint swap_table;
         GLint tev_swap[PC_GX_MAX_TEV_STAGES];
     } uloc;

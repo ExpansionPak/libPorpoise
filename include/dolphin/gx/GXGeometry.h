@@ -21,7 +21,7 @@ void GXEnableTexOffsets(GXTexCoordID coord, GXBool line_enable, GXBool point_ena
 void GXSetArray(GXAttr attr, const void* data, u8 stride);
 #define GXSETARRAY(attr, data, size, stride) GXSetArray((attr), (data), (stride))
 void GXInvalidateVtxCache(void);
-void GXSetVtxAttrFmtv(GXVtxFmt vtxfmt, GXVtxAttrFmtList* list);
+void GXSetVtxAttrFmtv(GXVtxFmt vtxfmt, const GXVtxAttrFmtList* list);
 
 static inline void GXSetTexCoordGen(GXTexCoordID dst_coord, GXTexGenType func, GXTexGenSrc src_param, u32 mtx) {
   GXSetTexCoordGen2(dst_coord, func, src_param, mtx, GX_FALSE, GX_PTIDENTITY);
