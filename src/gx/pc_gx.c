@@ -7,6 +7,7 @@ static GLushort quad_index_buf[(PC_GX_MAX_VERTS / 4) * 6];
 #include <dolphin/gx/GXEnum.h>
 #include <dolphin/gx/GXFifo.h>
 #include <dolphin/gx/GXManage.h>
+#include <dolphin/gx/GXTexture.h>
 #include <dolphin/demo/DEMOInit.h>
 #include <dolphin/os/OSThread.h>
 #include <dolphin/vi.h>
@@ -7467,5 +7468,4 @@ void GXResetStreamState(void) {
         g_gx.current_vertex.tex_mtx_idx[i] = (float)g_gx.current_tex_mtx_idx[i];
     }
 }
-
 
