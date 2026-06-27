@@ -42,6 +42,12 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(SDL2_INCLUDE_DIRS "")
 set(SDL2_LIBRARIES "")
 set(SDL2_IMPORTED_TARGET "")
+if(TARGET SDL2::SDL2)
+    set(SDL2_FOUND TRUE)
+    set(SDL2_IMPORTED_TARGET SDL2::SDL2)
+    set(SDL2_LIBRARIES SDL2::SDL2)
+    message(STATUS "Using parent SDL2 target")
+else()
 find_package(SDL2 QUIET)
 if(SDL2_FOUND)
     message(STATUS "Found SDL2 via find_package")
@@ -86,6 +92,7 @@ else()
         endif()
     endif()
 endif()
+endif()
 
 if(NOT SDL2_IMPORTED_TARGET)
     # Create a dummy interface target to keep include paths working even if SDL2 isn't available yet
@@ -100,7 +107,7 @@ if(SDL2_LIBRARIES STREQUAL "" AND SDL2_IMPORTED_TARGET)
 endif()
 
 # Include directories
-include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 include_directories(${SDL2_INCLUDE_DIRS})
 
 # Default to real OS threads for stability across demos and game builds.
@@ -249,11 +256,12 @@ set_target_properties(porpoise PROPERTIES
 )
 
 target_include_directories(porpoise PUBLIC
-    ${CMAKE_SOURCE_DIR}/src/gx/glad/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gx/glad/include
 )
 target_compile_definitions(porpoise PRIVATE
-    PORPOISE_GX_SHADER_DIR="${CMAKE_SOURCE_DIR}/src/gx/shaders"
-    PORPOISE_ACPC_SHADER_DIR="${CMAKE_SOURCE_DIR}/src/gx/shaders"
+    PORPOISE_GX_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/gx/shaders"
+    PORPOISE_ACPC_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/gx/shaders"
 )
 
 # Enable full memory emulation if requested
@@ -341,7 +349,7 @@ install(DIRECTORY include/dolphin
 
 # Examples
 if(PORPOISE_BUILD_EXAMPLES)
-    if(EXISTS "${CMAKE_SOURCE_DIR}/examples/CMakeLists.txt")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt")
         add_subdirectory(examples)
     else()
         message(WARNING "PORPOISE_BUILD_EXAMPLES is ON but examples/ is missing; skipping examples build.")

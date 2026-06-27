@@ -35,6 +35,13 @@ static void EnsureConsole(void) {
         return;
     }
 
+    HANDLE stdoutHandle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (stdoutHandle != NULL && stdoutHandle != INVALID_HANDLE_VALUE &&
+        GetFileType(stdoutHandle) != FILE_TYPE_UNKNOWN) {
+        s_consoleAttached = TRUE;
+        return;
+    }
+
     if (!GetConsoleWindow()) {
         if (!AllocConsole()) {
             AttachConsole(ATTACH_PARENT_PROCESS);
