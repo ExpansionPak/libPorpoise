@@ -11,6 +11,27 @@
 #include <string.h>
 #include <ctype.h>
 
+static char s_defaultWindowTitle[256];
+
+/*---------------------------------------------------------------------------*
+  Name:         VISetDefaultWindowTitle
+
+  Description:  Override the default SDL window title.
+
+  Arguments:    title  New title, or NULL to restore the library default
+
+  Returns:      None
+ *---------------------------------------------------------------------------*/
+void VISetDefaultWindowTitle(const char* title) {
+    if (!title || title[0] == '\0') {
+        s_defaultWindowTitle[0] = '\0';
+        return;
+    }
+
+    strncpy(s_defaultWindowTitle, title, sizeof(s_defaultWindowTitle) - 1);
+    s_defaultWindowTitle[sizeof(s_defaultWindowTitle) - 1] = '\0';
+}
+
 /*---------------------------------------------------------------------------*
   Name:         VIGetDefaultConfig
 
@@ -28,7 +49,10 @@ void VIGetDefaultConfig(VIConfig* config) {
     config->windowHeight = 480;
     config->fullscreen = FALSE;
     config->maximized = FALSE;
-    strcpy(config->windowTitle, "libPorpoise Game");
+    strncpy(config->windowTitle,
+            s_defaultWindowTitle[0] ? s_defaultWindowTitle : "libPorpoise Game",
+            sizeof(config->windowTitle) - 1);
+    config->windowTitle[sizeof(config->windowTitle) - 1] = '\0';
     
     // Graphics defaults
     config->vsync = 1;              // VSync on by default
@@ -219,4 +243,3 @@ BOOL VILoadConfig(VIConfig* config) {
     
     return TRUE;
 }
-

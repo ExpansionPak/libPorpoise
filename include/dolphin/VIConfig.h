@@ -55,9 +55,15 @@ BOOL VILoadConfig(VIConfig* config);
  */
 void VIGetDefaultConfig(VIConfig* config);
 
+/**
+ * @brief Set the default window title used when vi_config.ini is absent.
+ *
+ * @param title  Window title, or NULL to restore the library default
+ */
+void VISetDefaultWindowTitle(const char* title);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif // VI_CONFIG_H
-
